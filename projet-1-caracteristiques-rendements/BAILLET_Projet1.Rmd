@@ -1,0 +1,1642 @@
+---
+title: "Etude des caractéristiques des rendements logarithmiques de l'action Schneider Electric "
+author: "BAILLET Benjamin"
+date: "2024-10-16"
+output:
+  html_document:
+    theme: cosmo
+    number_sections: no
+    toc: yes
+    toc_float: yes
+    code_folding: hide
+  pdf_document:
+    toc: yes
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+```{r Librairies recquises, include=FALSE}
+library(yfR)
+library(scales)
+library(forecast)
+library(moments)
+library(TSA)
+library(lmtest)
+library(FinTS)
+library(tseries)
+library(CADFtest)
+library(urca)
+library(fGarch)
+library(rcompanion)
+
+```
+
+ **Econométrie des séries temporelles**, **Value at Risk et Backtesting**, *Université de Bordeaux 2023-2025.*  
+
+# **Introduction**
+
+**L'objectif de ce projet est d'étudier les caractéristiques des rendements logarithmiques de l'action de Schneider Electric.**
+
+## **Objectif**
+
+**Les 8 principales propriétés des rendements logarithmiques des actions exhibées par Charpentier:**
+
+-   L'asymétrie perte/gain
+-   les queues de distribution épaisses
+-   L'autocorrélation des carrées des rendements
+-   Les clusters de volatilité
+-   Les queues épaisses conditionnelles
+-   L'effet de levier
+-   La saisonnalité
+-   La stationnarité
+
+Nous devons examiner 8 caractéristiques des rendements logarithmiques associés à l'action de Schneider Electric. 
+Il convient de constater que nous allons vérifier que ces caractéristiques des rendements logarithmiques observées dans l'ensemble de données d'estimation sont également présentes dans l'ensemble de test.
+Nous allons donc travailler tout le long avec rte et à la fin en annexe, nous allons mettre les résultats obtenus avec rtt car on aura remplacé rte par rtt et on notera les résultats dans le tableau.
+
+En effet selon le cours, pour que la procédure globale soit correcte, il faut que les caractéristiques du rendement logarithmique présentes dans l’ensemble d’estimation le soient aussi dans l’ensemble de test.
+
+## **Récupération des données**
+
+```{r données, message=FALSE}
+my_ticker <- 'SU.PA'
+first_date <- "2010-01-04"
+last_date <-"2024-09-23"
+
+# fetch data
+df_yf <- yf_get(tickers = my_ticker, 
+                first_date = first_date,
+                last_date = last_date,
+                freq_data='daily',type_return='log')
+
+pt<-df_yf$price_adjusted
+dpt=diff(pt)
+rt=df_yf$ret_adjusted_prices[-1]
+
+N<-length(rt) 
+
+# dates[2555] => 31/12/2019 = dernière date de 2019
+# dates[2556]  => 02/01/2020 = première date de 2020
+
+rte=rt[1:2555] #rt sur l'ensemble d'estimation de 2010 à 2019 inclu
+rtt=rt[2556:N] #rt sur l'ensemble de test de 2020 à 2024 inclu
+T<-length(rte)  #nombre d'observations dans l'ensemble d'estimation 
+Q<-length(rtt)  #nombre d'observations dans l'ensemble de test 
+
+  # Si pvalue < 0,05, on rejette donc H0 : présence d'effet ARCH (cluster de volatilité)
+  # On veut des effets arch pour rte et rtt
+  
+  # Pour rte
+  
+  ArchTest(as.numeric(rte),lag=1) # ordre 1
+  ArchTest(as.numeric(rte),lag=2) # ordre 2
+  
+  # Pour rtt
+  
+  ArchTest(as.numeric(rtt),lag=1)
+  ArchTest(as.numeric(rtt),lag=2)
+```
+
+## **Chronogrammes**
+
+```{r chronogramme1}
+  datesp<-df_yf$ref_date
+  first_day_of_year = NULL
+  for (i in 1:15) {
+    first_day_of_year[i] = as.character(datesp[format(datesp, "%Y") == 2009+i][1])
+  }
+  
+  plot(datesp, pt, type='l', ylab="Cours de Schneider Electric (€)", xlab="Temps", cex.main=1.5, main="Evolution du cours de l'action de Schneider Electric", xaxt = "n")
+  
+  axis(side = 1, at=as.Date(first_day_of_year), labels=format(as.Date(first_day_of_year), "%Y"))
+  
+  fit0 = lm(pt ~ datesp)
+  abline(fit0, col="red")
+```
+
+
+On peut voir sur ce graphique que le cours de Schneider Electric a une tendance croissante et celle-ci est représentée en rouge par le biais d'une régression linéaire.
+
+
+```{r chronogramme2}
+dates<-datesp[-1] # -1 pour la première valeur manquante 
+  
+  op=par(mfrow=c(2,1))
+  plot(dates, dpt, type='l', col="red", main="Variations du cours de Schneider Electric (€)", cex.main=1.5, ylab="Variation du cours (€)",xlab="Dates", xaxt = "n", las=1)
+  axis(side = 1, at=as.Date(first_day_of_year), labels=format(as.Date(first_day_of_year), "%Y"))
+  m=mean(dpt)
+  abline(h=m,col="blue",main="moyenne")
+  
+  plot(dates, rt, type='l', col='blue', main="Rendement logarithmique du cours de Schneider Electric", ylab="Rendement logarithmique", xlab="Dates", xaxt = "n", las=1)
+  axis(side = 1, at=as.Date(first_day_of_year), labels=format(as.Date(first_day_of_year), "%Y"))
+  m=mean(rt)
+  abline(h=m,col="red", main="moyenne")
+  rm(first_day_of_year)
+  par(op)
+  
+```
+
+On voit sur ces deux graphiques que les variations et le rendement logarithmique de l'action de Schneider Electric fluctuent autour de 0 et ces fluctuations semblent varier dans le temps. 
+On peut également distinguer des clusters de volatilité en 2020 ce qui est justifié par la crise du COVID.
+
+# **Etude de l'ensemble d'entrainement**
+
+## **Histogramme**
+<div id="Histrte"></div>
+On va comparer la distribution de $r_{te}$ par rapport à une loi normale.
+
+```{r histogramme}
+plotNormalHistogram(rte, breaks='FD', main="Distribution de rte par rapport à une normale", ylab="Fréquence", xlab="Valeurs")
+```
+
+On constate qu'il y a davantage de valeurs extrêmes dans la distribution de $r_{te}$ que dans une distribution normale.
+
+## **Test de moyenne empirique nulle**
+
+On cherche désormais à vérifier que la moyenne empirique de $r_{te}$ (`r sprintf(mean(rte), fmt = '%#.7f')`) est statistiquement nulle. 
+Pour cela, on teste :
+
+<center> $H_0 : E[r_{te}]= \mu = 0$ VS $H_a : E[r_{te}]= \mu \neq 0$ </center> <br>
+par le calcul de la statistique t :
+<center> $$t=\frac{\overline{r_{te}}}{\hat{\sigma}/\sqrt{T}}$$ </center> <br>
+avec :  
+$T$, la taille de l'échantillon (de $r_{te}$)  
+$\overline{r_{te}}$, la moyenne des rendements logarithmes de $r_{te}$  
+$\hat{\sigma}$, l'écart type estimé de $r_{te}$  
+
+Sous $H_0$, t suit une loi de Student à $T-1$ degrés de liberté.
+
+
+La règle de décision est : Si la $p-value < 0,05$ alors on rejette $H_0$.
+
+```{r t test}
+t.test(rte)
+```
+La $p-value$ est de $0.2379> 0.05$. On accepte donc $H_0$ : la moyenne empirique de $r_{te}$ est statistiquement nulle.
+
+
+# **I. Asymétrie perte/gain**
+
+On fait un test de l’hypothèse de symétrie consistant à tester la nullité de la skewness qui est égale au moment centré d’ordre 3 normalisé de la distribution. 
+Soit $\mu_3$, le moment centré d’ordre 3 d’une variable aléatoire X : $\mu_3 = E[(X-\mu)^3]$. On va donc tester :  
+<center> $H_0 : E[(\frac{X-E[X]}{\sigma_X})^3] = 0$ VS $H_a : E[(\frac{X-E[X]}{\sigma_X})^3] \neq 0$ </center> <br>
+Pour cela, on réalise le test d'agostino qui teste sa nullité.  
+
+Sous $H_0$, la statistique suit une loi Normale centrée réduite.  
+
+La règle de décision est : Si la $p-value < 0,05$ alors on rejette $H_0$.
+
+```{r test Agostino}
+agostino.test(rte)
+```
+La valeur de la skewness obtenue est $-0.047$ environ et la $p-value$ est de $0.3298 > 0.05$. 
+On accepte donc $H_0$ : la skewness est statistiquement nulle et la distribution est symétrique.
+
+**Propriété 1: validée**
+
+
+# **II. Queues de distribution épaisses**
+
+On réalise un test d'anscombe qui consiste à tester si le moment centré d’ordre 4 d’une variable aléatoire X : $\mu_4 = E[(X-\mu)^4]$. On veut tester si la kurtosis vaut 3 (kurtosis d'une loi normale) :
+<center> $H_0 : E[(\frac{X-E[X]}{\sigma_X})^4] = 3$ VS $H_a : E[(\frac{X-E[X]}{\sigma_X})^4] \neq 3$ </center> <br>
+Pour cela, on réalise donc le test d'anscombe qui teste si elle est égale à 3.
+
+
+Sous $H_0$, la statistique suit une loi Normale centrée réduite. 
+
+La règle de décision est : Si la $p-value < 0,05$ alors on rejette $H_0$.
+
+```{r test anscombe}
+anscombe.test(rte)
+```
+La valeur du kurtosis obtenue est $5.5215$ et la $p-value$ est $<2.2*10^{-16} < 0.05$. 
+On rejette donc $H_0$ : le kurtosis est donc significativement différent de 3. 
+Puisque la valeur obtenue est supérieure à 3, la distribution est leptokurtique, on a donc des queues de distribution plus épaisses qu'une loi normale dues à la présence de valeurs extrêmes.
+
+**Propriété 2: validée**
+
+# **III. L'autocorrélation des carrées des rendements**
+
+## **ACF**
+
+
+```{r ACF}
+op<-par(mfrow=c(2,1))
+Acf(rte,main='ACF du rendement logarithmique')
+Acf(rte^2,main='ACF du rendement logarithmique au carré')
+par(op)
+```
+
+L'ACF nous permet de voir les coefficients d'autocorrélation $\rho$ des rendements logarithmiques et des rendements logarithmiques au carré. 
+Pour les rendements logarithmiques, on a $\rho(5)$, $\rho(16)$, $\rho(20)$, $\rho(26)$significatifs, donc on a de faibles autocorrélations à l'ordre 5 , 16, 20, 26.
+Pour les rendements logarithmiques au carré, on a tous les rho significatifs, donc on a de l'autocorrélation forte à tous les ordres. 
+
+
+## **Ljung box**
+
+On réalise également le test de Ljung-Box.
+
+La statistique s'écrit :
+<center> $Q_K = T \times (T+2) \sum_{k=1}^{K} \frac{\hat \rho (k)^2}{T-K}$ </center>
+avec T, le nombre d’observations
+
+Dans le test de Ljung Box, nous testons : 
+$H_0:\rho_1=\rho_2=\rho_3=...=\rho_k\rightarrow Absence\:d'autocorr\acute{e}lation\:jusqu'\grave{a}\:l'ordre\:k$  
+$VS$  
+$H_a:\:au\;moins\;un\;\rho_i\ne0\rightarrow\;Pr\acute{e}sence\;d'autocorr\acute{e}lation$
+
+Sous $H_0$ : $Q_K \underset{T\to +\infty}\longrightarrow \chi^2$
+
+
+La règle de décision est : Si la $p-value < 0,05$ alors on rejette $H_0$
+
+Pour l'autocorrélation faible :  
+```{r LB rte}
+Box.test(rte, lag = 1, type="Ljung-Box")
+```
+Pour lag = 1, la $p-value$ est de $0.3764 > 0.05$. On accepte donc l’hypothèse nulle d’absence d’autocorrélation pour $r_{te}$.
+
+Pour l'autocorrélation forte :  
+```{r LB rte2}
+Box.test(rte^2, lag = 1, type="Ljung-Box")
+```
+Pour lag = 1, la $p-value$ est de $3.343e-13 < 0.05$. On rejette donc l’hypothèse nulle d’absence d’autocorrélation pour $r_{te}^2$ et on conclut qu'il y a de l'autocorrélation dès l'ordre 1 sur les carrés des rendements.
+
+## **EACF**
+
+Afin de modéliser l'autocorrélation, on utilise l'EACF qui nous permet de trouver p et q dans le modèle ARMA(p,q) que l'on va estimer. Mais rien ne nous dit que ces valeurs de p et q sont optimales. 
+
+<div id="ARMA"></div>
+**AR** :  
+
+Un modèle AR(p) (autorégressif d'ordre p) s'écrit :  
+<center>$$X_t = c +\sum_{i=1}^p  \phi_iX_{t-i} +\varepsilon_t$$</center><br>
+avec :  
+$\phi_1,\dots,\phi_p$, les paramètres du modèle ;  
+$c$, une constante ;  
+$\varepsilon_t$, un bruit blanc.
+
+<br>
+**MA** :  
+
+Un modèle MA(q) s'écrit :  
+<center>$$X_t=\varepsilon_t + \sum_{i=1}^q\theta_i\varepsilon_{t-i}$$</center><br>
+avec :  
+$\theta_i,\dots,\theta_q$, les paramètres du modèle ;  
+$\varepsilon_t,\varepsilon_{t-1}, \dots, \varepsilon_q$, des termes d'erreurs. Ces derniers sont supposés indépendants et identiquement distribués selon une loi normale de moyenne nulle.  
+
+**Modèle ARMA**
+
+Un modèle ARMA(p,q) est une modèle autorégressif et moyenne mobile d'ordre (p,q) :
+<center>$$X_t=\varepsilon_t+\sum_{i=1}^p \phi_i X_{t-i} + \sum_{i=1}^q \theta_i \varepsilon_{t-i}$$</center><br>
+
+On cherche donc un modèle ARMA(p,q) où tous les coefficients sont significatifs et dans le cas contraire, le paramètre associé est défini comme égal à 0. 
+La règle de décision est : si la p-value d'un coefficent est  supérieure à 0.05 alors le coefficient n'est pas significatif. 
+Si plusieurs coefficients ne sont pas significatifs, on va retirer de la régression celui ayant la p-value la plus grande.
+
+### **EACF**
+
+Pour modéliser l'autocorrélation dans $r_{te}$, nous utilisons un modèle ARMA(p,q).
+
+```{r eacf}
+eacf(rte)
+```
+L'EACF nous donne (p, q) = (0, 5) comme valeurs de départ.
+On estime donc un MA(5). Mais on va chercher le meilleur modèle en faisant augmenter les valeurs de p et de q.
+
+On va donc fixer à 0 la valeur de tous les coefficients qui ne sont pas significatifs
+
+### **Test de coefficients et recherche du meilleur modèle**
+
+```{r test coefficients}
+  reg1 = Arima(rte, order = c(0,0,1)) # MA(1)
+  coeftest(reg1)
+  # pas bon modèle car ma1 non significatif
+  
+  reg2 = Arima(rte, order = c(0,0,2)) # MA(2)
+  coeftest(reg2)
+  reg2 = Arima(rte, order = c(0,0,2), fixed=c(0,NA,NA))
+  coeftest(reg2)
+  # bon modèle car ma2 siginificatif
+  
+  reg3 = Arima(rte, order = c(0,0,3)) # MA(3)
+  coeftest(reg3)
+  # pas bon modèle car ma1 et ma3 non significatifs
+  
+  reg4 = Arima(rte, order = c(0,0,4)) # MA(4)
+  coeftest(reg4)
+  reg4 = Arima(rte, order = c(0,0,4),fixed=c(0,NA,0,NA,NA)) 
+  coeftest(reg4)
+  # bon modèle car ma2 et ma4 significatifs
+  
+  reg5 = Arima(rte, order = c(0,0,5)) # MA(5)
+  coeftest(reg5)
+  reg5 = Arima(rte, order = c(0,0,5),fixed=c(0,NA,0,NA,NA,NA)) 
+  coeftest(reg5)
+  # bon modèle car ma2, ma4 et ma5 significatifs
+  
+  reg6 = Arima(rte, order = c(1,0,1)) # ARMA(1,1)
+  coeftest(reg6)
+  # bon modèle car ar1 et ma1 significatifs
+  
+  reg7 = Arima(rte, order = c(1,0,2)) # ARMA(1,2)
+  coeftest(reg7)
+  reg7 = Arima(rte, order = c(1,0,2),fixed=c(0,0,NA,NA)) 
+  coeftest(reg7)
+  # bon modèle car ma2 significatif
+  
+  reg8 = Arima(rte, order = c(2,0,2)) # ARMA(2,2)
+  coeftest(reg8)
+  # mauvais modèle car il y a des Nan
+  
+  reg9 = Arima(rte, order = c(3,0,1)) # ARMA(3,1)
+  coeftest(reg9)
+  reg9 = Arima(rte, order = c(3,0,1),fixed=c(NA,0,0,NA,NA))
+  coeftest(reg9)
+  # bon modèle car ar1 et ma1 significatifs
+  
+  # On garde donc reg2, reg4, reg5, reg6,reg7, reg9
+```
+
+La lecture de l'EACF nous invite à tester les modèles suivants :  MA(1), MA(2), MA(3), MA(4), MA(5), ARMA(1,1), ARMA(1,2), ARMA(2,2), ARMA(3,1) pour garder le meilleur modèle viable. 
+
+Mais on ne garde que MA(2), MA(4), MA(5), ARMA(1,1), ARMA(1,2), ARMA(3,1) à la suite du test de coefficients.
+
+Un modèle est considéré comme viable si l'espérance des aléas est nulle et si ceux-ci ne sont pas autocorrélés. 
+
+Pour cela, il va tester le premier critère par un test t de Student et le second par test de Ljung-Box des résidus standardisés :  
+
+
+## **Viabilité du modèle**
+### **t test**
+
+Nous testons l'espérance des aléas :
+
+$$H_{0}: L'esp\acute{e}rance\:des\:al\acute{e}as\:est\:nulle : E(\epsilon)=0$$
+$$VS$$
+$$H_{a}: L'esp\acute{e}rance\:des\:al\acute{e}as\:n'est\:pas\:nulle: E(\epsilon)\ne0$$
+
+La statistique est :
+<center> $t=\frac{|m(e)|}{\sigma_e} \times \sqrt{T}$</center>
+avec :  
+T, le nombre d’observations ;  
+$m(e)$, la moyenne des résidus de la régression ;  
+$\sigma_e$, l'écart type des résidus ;
+
+Sous $H_0$, cette statistique est distribuée comme une normale centrée réduite et la condition d'acceptation est t < au quantile de la loi normale centrée réduite (1,96 pour un seuil à 5%) ou de manière équivalente que la p-value est inférieure à 5%.
+
+```{r t reg}
+residu2<-reg2$res
+t.test(residu2)
+
+residu4<-reg4$res
+t.test(residu4)
+
+residu5<-reg5$res
+t.test(residu5)
+
+residu6<-reg6$res
+t.test(residu6)
+
+residu7<-reg7$res
+t.test(residu7)
+
+residu9<-reg9$res
+t.test(residu9)
+```
+Les $p-values$ sont supérieures à $0.05$. On accepte donc $H_0$ : l'espérance des aléas est nulle.
+
+
+### **test de Ljung-Box***
+
+On reprend le test de Ljung-Box tel que décrit plus haut mais on le réalise sur des résidus standardisés, c'est-à-dire centrés-réduits.
+
+Nous allons essayé de trouver le meilleur modèle AR, MA ou ARMA pour modéliser nos données.
+
+```{r ARCH reg}
+residu2<-reg2$res
+  residuv2=(residu2-mean(residu2))/sd(residu2)
+  K<-20
+  tmp2<-rep(0,K)
+  for(i in 1:K){
+    tmp2[i]<-Box.test(residuv2,lag=i,type="Ljung-Box")$p.value
+  }
+  tmp2
+  
+  residu4<-reg4$res
+  residuv4=(residu4-mean(residu4))/sd(residu4)
+  K<-20
+  tmp4<-rep(0,K)
+  for(i in 1:K){
+    tmp4[i]<-Box.test(residuv4,lag=i,type="Ljung-Box")$p.value
+  }
+  tmp4
+  
+  residu5<-reg5$res
+  residuv5=(residu5-mean(residu5))/sd(residu5)
+  K<-20
+  tmp5<-rep(0,K)
+  for(i in 1:K){
+    tmp5[i]<-Box.test(residuv5,lag=i,type="Ljung-Box")$p.value
+  }
+  tmp5
+  
+  residu6<-reg6$res
+  residuv6=(residu6-mean(residu6))/sd(residu6)
+  K<-20
+  tmp6<-rep(0,K)
+  for(i in 1:K){
+    tmp6[i]<-Box.test(residuv6,lag=i,type="Ljung-Box")$p.value
+  }
+  tmp6
+  
+  residu7<-reg7$res
+  residuv7=(residu7-mean(residu7))/sd(residu7)
+  K<-20
+  tmp7<-rep(0,K)
+  for(i in 1:K){
+    tmp7[i]<-Box.test(residuv7,lag=i,type="Ljung-Box")$p.value
+  }
+  tmp7
+  
+  residu9<-reg9$res
+  residuv9=(residu9-mean(residu9))/sd(residu9)
+  K<-20
+  tmp9<-rep(0,K)
+  for(i in 1:K){
+    tmp9[i]<-Box.test(residuv9,lag=i,type="Ljung-Box")$p.value
+  }
+  tmp9
+```
+On observe que les $p-values$ ne sont pas toutes supérieures à $0.05$ pour MA(2), MA(4), ARMA(1,2).
+Pour MA(5), ARMA(1,1), ARMA(3,1), toutes les $p-values$ sont supérieures à $0.05$. On accepte donc l’hypothèse nulle d’absence d’autocorrélation des aléas jusqu'à l'ordre 20. On en conclue donc que les aléas de ces 3 modèles ne sont pas autocorrélés. 
+
+On choisira le modèle minimisant le critère d'information BIC.
+
+
+```{r BIC reg}
+BIC(reg5)
+BIC(reg6)
+BIC(reg9)
+```
+Le BIC minimal est celui du du modèle MA(5) et il vaut est de -13275.85.
+ 
+**Le modèle que l'on va conserver est un MA(5) car c'est le modèle viable qui minimise le BIC.** 
+
+**Propriété 3: validée**
+
+# **IV. Cluster de volatilité**
+
+Nous cherchons ici à savoir s'il existe des clusters de volatilité dans les données. 
+
+Le test ARCH(p) consiste à estimer par MCO l'équation suivante :
+<center>$e_t^2 = a+c_1e_{t-1}^2+c_2e_{t-2}^2 + \dots + c_pe_{t-p}^2 + erreur_t$</center>
+avec :  
+$e$ les résidus de la régression ;  
+$a$ une constante ;  
+puis à tester la nullité de tous les coefficients $c$ de cette régression. Remarquez que si tous les $c$ sont nuls, alors la variance est égale à $a$ c’est-à-dire une constante (i.e homoscédasticité conditionnelle).
+
+La statistique de test est $LM = T \times R^2$ avec $R^2$ le coefficient de détermination associé à l’estimation de l'équation ci dessus et T, le nombre d'observations.
+
+Nous testons ici : 
+
+$$H_{0}:\alpha_{1}=\alpha_{2}=\dots=\alpha_{P}=0$$
+$$VS$$
+$$H_{a}:\alpha_{i}\ne0\;avec\;i\ne0$$
+Si $H_0$ est vrai alors nous avons : 
+
+-  $\sigma_t^2=\alpha_0$
+- non existence de cluster de volatilité 
+- pas d'effets ARCH
+- homoscédasticité conditionnelle
+
+Si $H_a$ est vrai alors nous avons : 
+
+- $\sigma_t^2=\alpha_0+\alpha_1e^2_{t-1}$
+- existence de cluster de volatilité 
+- présence d'effets ARCH
+- hétéroscédasticité conditionnelle 
+
+Sous $H_0$, $LM \sim \chi^2(p)$  
+La règle de décision est : Si la $p-value < 0,05$ alors on rejette $H_0$.
+
+
+```{r LM1}
+ArchTest(as.numeric(rte),lag=1)
+```
+La $p-value$ est de $3.795e-13< 0.05$. On rejette donc $H_0$ : présence d'effet ARCH (cluster de volatilité) à l'ordre 1.
+
+```{r LM2}
+ArchTest(as.numeric(rte),lag=2)
+```
+La $p-value$ est $< 2.2e-16 < 0.05$. On rejette donc $H_0$ : présence d'effet ARCH (cluster de volatilité) à l'ordre 2.
+
+```{r LM20}
+ArchTest(as.numeric(rte),lag=20)
+```
+La $p-value$ est $< 2.2e-16< 0.05$. On rejette donc $H_0$ : présence d'effet ARCH (cluster de volatilité) à l'ordre 20.
+
+**Il y a donc des clusters de volatilit <=> il y a de effets ARCH <=> il y a de l'hétéroscédascticité conditionnelle dans la série $r_{te}$.**
+
+**Propriété 4: validée**
+
+# **V. Queues épaisses conditionnelles**
+
+## **GARCH(1,1)**
+
+On estime un modèle GARCH(1,1) sur les résidus du MA(5) pour modéliser les clusters de volatilité: 
+<center> $\sigma_t^2 = \alpha_0+\alpha_1 \epsilon_{t-1}^2 + \beta_{t-1}^2$ </center> <br>
+
+```{r garch}
+residuv5 =(residu5-mean(residu5))/sd(residu5)
+volat<-garch(residuv5,order=c(1,1))
+```
+
+Nous allons ensuite utiliser la fonction *garchFit* du package *fGarch* .
+
+
+```{r garchFit}
+volat = garchFit(residuv5~garch(1,1), data=rte, trace=F, include.mean=F)
+volat
+```
+On peut voir que les p-values de $\omega$, $\alpha_1$ et $\beta_1$ sont inférieures à 5% donc on en conclut qu'ils sont tous les trois significatifs.
+
+On réalise à nouveau le test ARCH décrit dans la propriété IV pour voir si toute l'hétéroscédasticité conditionnelle à été prise en compte par le modèle GARCH(1,1).
+
+```{r arch}
+ArchTest(volat@residuals, lag=1)
+```
+La $p-value$ est de $3.472e-13< 0.05$. 
+On rejette donc $H_0$ : l'hétéroscédasticité conditionnelle n'a pas été totalement prise en compte.
+
+On essaie alors d'augmenter la valeur de n ou m dans le GARCH(n,m).
+
+## **GARCH(1,2)**
+```{r garchFit 1,2}
+volat = garchFit(residuv5~garch(1,2), data=rte, trace=F, include.mean=F)
+volat
+```
+La p-value de $\beta_2$ est de $1$, il n'est donc pas significatif et on ne peut donc pas utiliser de modèle GARCH(1,2)
+
+## **GARCH(2,1)**
+```{r garchFit 2,1}
+volat = garchFit(residuv5~garch(2,1), data=rte, trace=F, include.mean=F)
+volat
+```
+La p-value de $\alpha_2$ est de $0.36$ environ, il n'est donc pas significatif et on ne peut pas utiliser de modèle GARCH(2,1)
+
+
+Finalement, augmenter le nombre de coefficients du modèle GARCH ne donne rien de concluant et nous allons donc conserver un modèle GARCH(1,1). Nous devons par ailleurs tenir compte du fait que toute l'hétéroscédasticité conditionnelle n'a pas été prise en compte. 
+
+De ce fait on ne peut pas réaliser le test d'anscombe et on ne peut pas non plus conclure sur les queues épaisses conditionnelles de la distribution de $r_{te}.$
+
+**Propriété 5: non concluant**
+
+# **VI. Effet de levier**
+
+L'effet de levier peut être expliqué par le fait que les baisses de cours tendent à engendrer une augmentation de la volatilité supérieure à celle induite par une hausse des cours de même ampleur. 
+Afin d'illustrer cela on fait un graphique des prix et de leur volatilité.
+
+Comme estimateur naïf de la volatilité en t, on utilise l’écart-type des 22 plus récents jours :
+<center> $$\sigma_t^{(22)} = \sqrt{\frac{\sum_{i=t-22}^t(y_i-(\sum_{i=t-22}^t\frac{y_i}{22}))^2}{22}}$$</center> <br>
+
+```{r levier}
+  sig<-rep(0,T)
+  for(t in 1:T){
+    sig[t]<-sqrt(sum(rte[t-22]-(sum(rte[t-22]/22)))^2/22)
+  }
+  sigma=sig[24:T]*100
+  
+  plot(log(pt[24:length(rte)]), type='l', col=2,axes=F, xlab="", ylab="Cours de Schneider Electric (en log)", cex.lab=1.2, lwd=3, col.lab=2, main="Effet de la variation du cours sur la volatilité")
+  axis(side = 2, at = pretty(range(log(pt[24:length(rte)]))), col=2) #axe de gauche
+  par(new=T)
+  plot(sigma, col="grey",type='l',axes = F,xlab="", ylab="") 
+  axis(side = 4, at = pretty(range(sigma)), col="grey")      #axe de droite
+  mtext("Volatilité du cours de Schneider Electric", side = 4, line = 3, col="grey", cex=1.2)
+  title(xlab="Période étudiée (2010-2019)", line=0, cex.lab=1.2)
+    
+```
+
+Selon le graphique il semble que la volatilité de la plus grande baisse soit supérieure à la plus grande hausse. Donc il y a de l'effet de levier dans $r_{te}$.
+
+**Propriété 6: validée**
+
+# **VII. Saisonnalité**
+
+## **Effet week-end**
+
+Nous allons voir s'il est possible de distinguer une modification du comportement du cours de Schneider Electric en fonction du jour de la semaine. On peut par exemple penser qu'un évènement se déroulant le week-end (alors que la bourse est fermée) aura un impact sur la volatilité du cours le lundi. 
+En effet, l'effet Week-end s’explique par le fait que les marchés financiers sont affectés par
+l’accumulation d’informations durant les périodes de clôture du week-end, durant les jours
+fériés ou les vacances.
+
+```{r jours}
+jour=format(dates[1:T], format = "%A")
+tableaures <- data.frame(matrix(NA, ncol=5, nrow=4))
+colnames(tableaures) <- c("lundi", "mardi", "mercredi", "jeudi", "vendredi")
+rownames(tableaures) <- c("moyenne en %", "écart-type annuel en %", "skewness", "kurtosis")
+
+datesp <- df_yf$ref_date
+dates <- datesp[-1]  # -1 pour la première valeur manquante 
+
+# Conversion des dates en jours de la semaine et ajustement pour les noms français si nécessaire
+jour <- format(dates[1:T], format = "%A")
+jour[which(jour == "Monday")] <- "lundi"
+jour[which(jour == "Tuesday")] <- "mardi"
+jour[which(jour == "Wednesday")] <- "mercredi"
+jour[which(jour == "Thursday")] <- "jeudi"
+jour[which(jour == "Friday")] <- "vendredi"
+
+# Calcul pour chaque jour
+rtmar <- as.numeric(rte[jour == "mardi"])
+mardi <- mean(rtmar)  # moyenne journalière
+tableaures[1, 2] <- mardi * 100  # moyenne journalière en %
+tableaures[2, 2] <- sd(rtmar) * 100 * sqrt(252)  # écart-type annualisé en %
+tableaures[3, 2] <- skewness(rtmar)  # skewness
+tableaures[4, 2] <- kurtosis(rtmar)  # kurtosis
+
+rtmer <- as.numeric(rte[jour == "mercredi"])
+mer <- mean(rtmer)
+tableaures[1, 3] <- mer * 100
+tableaures[2, 3] <- sd(rtmer) * 100 * sqrt(252)
+tableaures[3, 3] <- skewness(rtmer)
+tableaures[4, 3] <- kurtosis(rtmer)
+
+rtjeu <- as.numeric(rte[jour == "jeudi"])
+jeudi <- mean(rtjeu)
+tableaures[1, 4] <- jeudi * 100
+tableaures[2, 4] <- sd(rtjeu) * 100 * sqrt(252)
+tableaures[3, 4] <- skewness(rtjeu)
+tableaures[4, 4] <- kurtosis(rtjeu)
+
+rtven <- as.numeric(rte[jour == "vendredi"])
+ven <- mean(rtven)
+tableaures[1, 5] <- ven * 100
+tableaures[2, 5] <- sd(rtven) * 100 * sqrt(252)
+tableaures[3, 5] <- skewness(rtven)
+tableaures[4, 5] <- kurtosis(rtven)
+
+rtlun <- as.numeric(rte[jour == "lundi"])
+lundi <- mean(rtlun)
+tableaures[1, 1] <- lundi * 100
+tableaures[2, 1] <- sd(rtlun) * 100 * sqrt(252)
+tableaures[3, 1] <- skewness(rtlun)
+tableaures[4, 1] <- kurtosis(rtlun)
+
+# Affichage du tableau
+tableaures
+
+```
+
+**Conclusion**: L’écart type du lundi n’est pas le plus grand (c'est celui du jeudi) et l’écart-type n’augmente pas à partir du mercredi mais dès le lundi jusqu'au jeudi. 
+Donc il semble qu'il n'y ait à priori pas d'effet week-end.
+
+
+## **Effet janvier**
+
+Dans la pratique, on observe des rendements statistiquement anormaux, positifs ou négatifs, des marchés d’actions selon les mois de l’année. Les mois les plus positifs en termes de performances sont, en général, Avril, suivi de Janvier, puis de Décembre.
+
+```{r mois}
+monthplot(rte, ylab="rendement",main="", cex.main=1,col.base=2,lwd.base=3)
+```
+
+Les moyennes de janvier, d’avril sont les plus élevées alors que celle de décembre n'en fait pas partie, mais la volatilité de janvier n’est pas la plus élevée. 
+Donc il semble qu'il n’y ait pas d’effet janvier dans $r_{te}$.
+
+**Propriété 7: non validée**
+
+# **VIII. Stationnarité**
+
+Nous allons réaliser 4 tests de racines unitaires pour trouver le processus générateur des données (PGD) de la série $r_{te}$. De manière générale, les rendements logarithmiques des actions sont stationnaires. On s'attend donc à avoir un PGD stationnaire que l'on pourra approximer par un processus AR (autorégressif), MA (moving average) ou à la fois AR et MA.
+
+Les tests de racine unitaire vont nous permettre d'identifier si notre PGD est stationnaire ou non. S'il n'est pas stationnaire, il a une tendance et il est donc TS (Trend Stationnary) ou DS (Difference Stationnary).
+
+***Un PGD est stationnaire si :***
+
+```{=tex}
+\begin{itemize}
+\item  son espérance ne dépend pas du temps : $E(X_t)=\mu$
+\item  son autocovariance ne dépend pas du temps : $E(X_t- \mu)(X_{t-s-\mu})=\gamma s$
+\item  sa variance est finie : $Var(X_t) < \infty $
+\end{itemize}
+```
+
+***Un PGD est DS (Difference Stationary) si :***
+
+```{=tex}
+\begin{itemize}
+\item son espérance dépend du temps : $E(X_t|X_0)=X_0 +\delta*tendance_t$
+\item sa variance dépend du temps : $Var(X_t|X_0)=tendance_t* \sigma^2_u$
+\end{itemize}
+```
+Il est aussi appelé marche aléatoire avec ou sans dérive : \begin{equation}
+X_t = \delta + X_{t-1}+u_t
+\end{equation}
+
+avec $u_t$ un bruit blanc et $\delta$ une constante appelée la dérive.
+
+***Un PGD est TS (Trend Stationary) si :***
+
+```{=tex}
+\begin{itemize}
+\item son espérance dépend du temps : $E(X_t)=\mu+\delta*tendance_t$
+\item sa variance ne dépend pas du temps : $\sigma^2_u$
+\end{itemize}
+```
+Il s'écrit : \begin{equation}
+X_t=\mu + \delta*tendance_t +u_t
+\end{equation} avec $\mu + \delta*tendance_t$ partie déterministe et $u_t$ partie aléatoire.
+
+
+Les tests de racines unitaires que nous allons réaliser sont :  
+  - Le test de Dickey-Fuller  
+  - Le test de Dickey-Fuller Augmenté  
+  - Le test de Zivot et Andrews  
+  - Le test de Lee et Strazicich  
+
+Ces tests permettent de mettre en lumière la présence de racines unitaires dans la série : s'il n'y en a pas, la série est dite stationnaire.  
+Le modèle de Lee et Strazicich est le plus récent et le plus complet, donc le plus efficace et c'est donc celui qui nous permettra de conclure sur la stationnarité de notre série.
+
+## **Dickey-Fuller**
+
+Dans le test de Dickey-Fuller, il existe trois spécifications possibles sachant qu'une seule est la bonne pour une série particulière : 
+
+- **Trend**
+- **Drift**
+- **None**
+
+- Pour la spécification "**Trend**", on à estimer par les MCO : 
+<center> $\Delta X_t=(\rho-1)X_{t-1}+\beta_0+\beta_1tendance_t+\epsilon_t$ </center> <br>
+puis à tester : 
+<center> $H_0:\rho-1=0\;et\;\beta_1=0$ VS $H_a:|\rho|<1\;et\;\beta_1\ne0$ </center> <br>
+
+Concernant le test de significativité de $\beta_1$, la règle de décision est : si la $p-value$ < $\alpha$, on rejette $H_0$ au risque $\alpha$ de 5%.
+
+Ensuite si $\beta_1$ est significatif, on teste : 
+
+<center>$H_0:\rho-1=0$  VS  $H_a:|\rho|<1$</center>
+
+Si la statistique t calculée pour $\rho-1$ est inférieure à la valeur critique donnée à l’intersection de la ligne tau2 et de la colonne 5%, alors on rejette $H_0$.
+
+- Pour la spécification "**Drift**", on estime par les MCO : 
+
+<center> $\Delta X_t=(\rho-1)X_{t-1}+\beta_0+\epsilon_t$ </center> <br>
+puis on teste : 
+<center> $H_0:\rho-1=0\;et\;\beta_0=0$ VS $H_a:|\rho|<1\;et\;\beta_0\ne0$ </center> <br>
+
+Concernant le test de significativité de $\beta_{0}$, la règle de décision est : si la $p-value$ < $\alpha$, on rejette $H_0$ au risque $\alpha$ de 5%.
+
+- Pour la spécification **None**, on estime :
+<center> $\Delta X_t=(\rho-1)X_{t-1}+\epsilon_t$ </center> <br>
+Et on teste : 
+
+<center>$H_0:\rho-1=0$  VS  $H_a:|\rho|<1$ </center>
+
+Si la statistique t calculée pour $(\rho-1)$ est inférieure à la valeur critique donnée à l’intersection de la ligne tau1 et de la colonne 5%, alors on rejette $H_0$.
+
+#### **Trend**
+
+```{r DF trend}
+summary(ur.df(rte,type="trend",lag=0))
+```
+
+La $p-value$ de $\beta_1$ est de 0.894  > 0,05. On accepte donc $H_0$ : $\beta_1 = 0$. On passe donc à la spécification drift puisque trend n'est pas la bonne.
+
+
+#### **Drift**
+
+
+```{r DF drift}
+summary(ur.df(rte,type="drift",lag=0))
+```
+La $p-value$ de $\beta_0$ est de 0.224  > 0,05. On accepte donc $H_0$ : $\beta_0 = 0$. On passe donc à la spécification none puisque drift n'est pas la bonne.
+
+#### **None**
+
+```{r DF none}
+summary(ur.df(rte,type="none",lag=0))
+```
+La statistique t calculée pour $(\rho-1)$ = -51.4152 < -1.95 , on rejette $H_0$ et le processus qui a généré nos données est stationnaire. 
+
+Cependant, cette conclusion n'est valable que si les aléas $\epsilon_t$ ne sont pas autocorrélés. 
+Testons cela avec l'ACF et le PACF des résidus des régressions DF.
+
+```{r plot DF}
+plot(ur.df(rte,type="none",lag=0)) 
+```
+
+On constate, dans le PACF, qu'il y a de l'autocorrélation des aléas puisque $a(2)$, $a(5)$, $a(16)$ et $a(20)$ sont significatifs. 
+La conclusion de notre test DF n'est donc pas valide. Nous allons alors faire le test Dickey-Fuller Augmenté puisque celui-ci tient compte de l'autocorrélation.  
+
+
+## **Dickey-Fuller Augmenté**
+
+Le test de Dickey-Fuller Augmenté (ADF) est un test de Dickey-Fuller (DF) avec des variables explicatives en plus qui sont la variable dépendante retardée jusqu'à l'ordre P. P étant le nombre de retards que nous ajoutons dans les régressions pour tenir compte de l'autocorrélation des aléas. 
+Il est généralement nécessaire de garder la même spécification que DF pour ADF. Dans notre cas, la spécification à garder est none que voici : 
+
+<center>$\Delta X_t=(\rho-1)X_{t-1}+\epsilon_t+\sum_{p=1}^{P}\gamma_p\Delta X_{t-p}$</center>
+
+Pour déterminer le nombre P de variables explicatives à ajouter, on va commencer par calculer $Pmax$ en reprenant la formule de Schwert, décrite plus haut dans le test de Zivot et Andrews. Puis nous allons minimiser le critère d'information de Ng et Perron (2001), le MAIC(p), calculé pour différentes valeurs de P allant de 0 à $Pmax$.
+
+Les critères MAIC et BIC ne nous donnent pas de variables à ajouter, on réalise donc la procédure de Perron (1989) : la procédure débute par le calcul de la valeur maximale de retards à introduire, Pmax. P ne doit ni être trop petit (risque de distorsion de la taille du test) ni être trop grand (risque de perte de puissance du test). Pmax est donné par la formule de Schwert (1989) : $[12\times(T/100)^{0,25}]$. On introduit ainsi pmax variables de retard  et on va retirer un par un les $\gamma$ qui ne sont pas significatifs jusqu'à aboutir à un modèle où le dernier $\gamma$ est significatif, sachant qu'on s'accorde à dire que $\gamma$ est significatif si la valeur absolue de sa statistique t > 1,64. 
+
+#### **MAIC**
+
+```{r DFA MAIC}
+pmax = as.integer(12*(T/100)^(0.25))
+summary(CADFtest(rte, criterion='MAIC', type='none', max.lag.y=pmax))
+```
+
+"Max lag of the diff. dependent variable" indique le nombre de variable explicative à ajouter pour tenir compte de l'autocorrélation. Ici il vaut 0.
+
+Selon le critère MAIC, il ne faut pas donc ajouter de variable de retard dans le test de Dickey-Fuller. 
+Nous cherchons cependant à en ajouter pour tenir compte de l'autocorrélation des aléas.
+
+Pour cela on va donc utiliser le critère du BIC.
+
+#### **BIC**
+
+Ce test a pour hypothèses :
+<center>$H_0 : \gamma_1 = 0$ VS $H_a : \gamma_1 \ne 0$ </center>
+
+Le critère est que si la valeur de la statistique t de $\gamma_1$ soit suppérieure au seuil de 1,64, alors on rejette $H_0$
+
+```{r DFA BIC}
+summary(CADFtest(rte,criterion="BIC",type="none",max.lag.y=pmax))
+```
+
+On trouve “Max lag of the diff.dependent variable” = 0, on doit donc partir de la valeur de pmax. 
+
+#### **Procédure de Perron**
+
+La procédure de Perron nous donne 26 variables à ajouter pour tenir compte de l'autocorrélation.
+
+On veut diminuer le nombre de gamma de telle sorte que le dernier ait une t statistique en valeur absolue > 1,64.
+
+
+```{r ADFrte Perron pmax}
+pmax <- as.integer(12*(T/100)^(0.25))
+summary(ur.df(rte,type="none",lag=pmax))
+```
+La $t-value$ en valeur absolue de $\gamma_{26}$ = 1.018  < 1,64 donc on enlève une variable de retard.
+
+
+```{r ADFrte Perron pmax-1}
+summary(ur.df(rte,type="none",lag=pmax-1))
+```
+
+La $t-value$ en valeur absolue de $\gamma_{25}$ = 1.674 > 1,64 donc on garde 25 variables de retard.
+
+La statistique t calculée pour $(\rho-1)$ = -10.2514 < -1.95, on rejette $H_0$ et le processus qui a généré nos données est stationnaire.
+
+On va maintenant passer aux tests prenant en compte des changements structurels, en commençant par Zivot et Andrews.
+
+
+## **Zivot et Andrews**
+
+Le test de Zivot et Andrews qui permet de prendre en compte un point de rupture dans la série.
+
+Nous allons donc introduire des variables afin de modéliser des changements structurels (qui seraient la cause du point de rupture). 
+Soit $T_B$ la date de changement structurel, $DU_t$ la variable à ajouter pour modéliser un changement dans le niveau de la partie déterministe de la série et $DT_t$ la variable à ajouter pour modéliser un changement dans la pente de la partie déterministe de la série.
+
+$DU_{t}=\begin{cases}
+1\;si\;t\geq\;T_{B}+1\\
+0\;sinon
+\end{cases}$
+
+$DT_{t}=\begin{cases}
+t-T_{B}\;si\;t\geq\;T_{B}+1\\
+0\;sinon
+\end{cases}$
+
+
+Pour une série économique comme le taux d'épargne, il est possible d'avoir deux spécifications : 
+
+- La spécification "**both**" : $y_t=\beta_0+\beta_1t+\rho y_{t-1}+\delta_1 DU_t(T_{B})+\delta_2 DT_t(T_B)+\sum_{j=1}^p\gamma_j\Delta y_{t-j}+\epsilon_t$  
+
+- La spécification "**intercept**" : $y_{t}=\beta_0+\beta_1t+\rho y_{t-1}+\delta DU_t(T_B)+\sum_{j=1}^p\gamma_j\Delta y_{t-j}+\epsilon_t$  
+
+Nous cherchons à tester $H_{0}:\rho=1$  VS  $H_a: \lvert \rho  \rvert < 1$.
+Sous  $H_{0}$ on a DS avec un changement structurel et sous $H_a$ on a TS avec un changement structurel.
+
+Si la statistique t calculée qui dépend de la date de rupture est supérieure à la valeur critique à 5%, nous acceptons $H_{0}$.
+
+#### **Procédure de Perron**
+
+On part de lag = pmax ici.
+
+On diminue la valeur du lag jusqu’à ce que le dernier gamma ait une statistique t en valeur absolue < 1.64 et l’avant dernier une statistique t en valeur absolue > 1.64.
+
+```{r ZArte Perron pmax}
+summary(ur.za(rte, model="both",lag=pmax))
+```
+
+La $t-value$ de $\gamma_{26}$ = 0.872  < 1,64 et la $t-value$ de $\gamma_{25}$ = 1,664  > 1,64 en valeur absolue donc on garde 26 variables de retard.
+
+
+La $p-value$ de $\delta1$ est de 0.00217< 0.05 donc $\delta1$ est significatif.
+
+La $p-value$ de $\delta2$ est de 0.00142 < 0.05 donc $\delta2$ est significatif.
+
+La spécification **both** est donc la bonne.
+
+La statistique de test est -10.4817 < -5.08 la valeur critique à 5% . 
+On rejette $H_0$ : $\mid\rho\mid < 1$.
+
+La conclusion de ce test est TS avec un changement structurel, ce qui ne nous permet pas de conclure que la série est stationnaire (elle peut avoir une racine unitaire et des changements structurels). 
+Nous allons passer au test de Lee et Strazicich qui est plus performant et qui sera celui dont on tirera la conclusion sur le PGD de notre série.
+
+## **Lee et Strazicich**
+
+Comme nous avons plus de 100 observations nous n’utiliserons pas “bootstrap” dans le test de Lee et Strazicich.
+
+Le test de Lee et Strazicich est une généralisation du test de racine unitaire de Schmidt et Phillips. Cette généralisation emploie la classification des changements structurels de Perron (1989) "crash" et "both" renommmés respectivement "crash" et "break" et introduit deux dates de rupture endogènes. Le modèle est le suivant : 
+$$y_{t}=\delta'Z_{t}+e_{t}$$
+$$e_{t}=\beta\:e_{t-1}+\epsilon_{t}$$
+avec $\epsilon \sim \mathcal{N}(0,\,\sigma^{2})$ et $Z$ la matrice des variables exogènes.
+
+Nous avons $T_{B1}$ la date du premier changement structurel et $T_{B2}$ la date du second : 
+
+- "**crash**" : $Z_t =[\iota,tendance,DU_{1t},DU_{2t}]'$ avec $DU_{jt}=1$ si $t\geq T_{Bj}+1$ pour $j=1,2$ et $0$ sinon
+
+- "**break**" : $Z_t =[\iota,tendance,DU_{1t},DU_{2t},DT_{1t},DT_{2t}]'$ avec $DT_{jt}=t-T_{Bj}$ si $t\geq T_{Bj}+1$ pour $j=1,2$ et $0$ sinon
+
+Pour "**crash**", nous testons : 
+
+$$H_0: y_t=\mu_0+d_1B_{1t}+d_2B_{2t}+y_{t-1}+v_{1t}$$
+$$VS$$
+$$H_a: y_t=\mu_1+\gamma \times trend_t+d_1D_{1t}+d_2D_{2t}+v_{2t}$$
+
+Pour "**break**", nous testons : 
+
+$$H_0: y_t=\mu_0+d_1B_{1t}+d_2B_{2t}+d_3D_{1t}+d_4D_{2t}+y_{t-1}+v_{1t}$$
+$$VS$$
+$$H_a: y_t=\mu_1+\gamma \times trend_t+d_1D_{1t}+d_2D_{2t}+d_3DT_{1t}+d_4DT_{2t}+v_{2t}$$
+
+Notons que dans tous les cas, le PGD comprend des changements structurels sous $H_0$ et sous $H_a$.
+Sous $H_0$ le PGD est DS avec une date de rupture et sous $H_a$ le PGD est TS avec une date de rupture.
+
+Le critère de décision est le suivant :  
+Si la valeur critique au croisement du $\lambda$ estimé et du seuil de risque 5% est supérieur à la statistique calculée, alors on rejette $H_0$.
+
+
+Le test LS est performant en taille et en puissance si une seule date de rupture est supposée.  
+On va prendre comme lag celui obtenu pour le test de Zivot et Andrews.
+
+Le modèle final que l'on va alors conserver est le modèle **break** (car correspond au modèle **both** obtenu au test ZA) avec $lag=26$, à une date de rupture et sans employer de bootstrap (la série est suffisamment longue).
+
+
+```{r source LS}
+source("./LeeStrazicichUnitRootTest.R", encoding = 'UTF-8')
+```
+
+```{r LS}
+myBreaks = 1
+myModel = "break"
+myLags = 26
+myLS_test = ur.ls(y=rte, model=myModel, breaks = myBreaks, lags = myLags, method = "GTOS",
+                  pn = 0.1, print.result = "print")
+```
+La valeur de la statistique de test est -11.6468 .  
+Le $\lambda$ estimé est 0.9 ce qui donne $T_B=2215$ donc la date de rupture correspond à `r df_yf[2215-1,]$ref_date`.  
+La valeur critique au seuil de risque de 5% vaut -4.51.  
+On a -11.6468 < -4.51. 
+
+On rejette donc $H_0$ : absence de racine unitaire. Le PGD est TS avec une date de rupture.
+
+**En conclusion, le PGD qui a généré notre série est stationnaire.**
+
+**Propriété 8: validée**
+
+# **Conclusion**
+
+## **Tableau récapitulatif des propriétés pour rte et rtt**
+
+
+<html>
+<head>
+  <style>
+    table {
+      border-collapse: collapse;
+    }
+
+    table, th, td {
+      border: 1px solid black;
+    }
+
+    th, td {
+      padding: 10px;
+      text-align: center;
+    }
+
+    th {
+      background-color: #ccc;
+    }
+
+    .tick {
+      color: green;
+    }
+
+    .cross {
+      color: red;
+    }
+  </style>
+</head>
+<body>
+
+<table>
+  <tr>
+    <th></th>
+    <th>Asymétrie perte/gain</th>
+    <th>Queues de distribution épaisses</th>
+    <th>Autocorrélation des carrées des rendements</th>
+    <th>Clusters de volatilité</th>
+    <th>Queues épaisses conditionnelles</th>
+    <th>Effet de levier</th>
+    <th>Saisonnalité</th>
+    <th>Stationnarité</th>
+  </tr>
+  <tr>
+    <th>$r_{te}$</th>
+    <td class="tick">&#10004;</td>
+    <td class="tick">&#10004;</td>
+    <td class="tick">&#10004;</td>
+    <td class="tick">&#10004;</td>
+    <td> pas concluant</td>
+    <td class="tick">&#10004;</td>
+    <td class="cross">&#10008;</td>
+    <td class="tick">&#10004;</td>
+  </tr>
+  <tr>
+    <th>$r_{tt}$</th>
+    <td class="cross">&#10008;</td>
+    <td class="tick">&#10004;</td>
+    <td class="tick">&#10004;</td>
+    <td class="tick">&#10004;</td>
+    <td> pas concluant </td>
+    <td class="tick">&#10004;</td>
+    <td class="cross">&#10008;</td>
+    <td class="tick">&#10004;</td>
+  </tr>
+</table>
+
+</body>
+</html>
+
+# **Annexe - La série $r_{tt}$**
+
+## **L'ensemble de test**
+Nous allons dans la suite de ce document nous intéresser à la série $r_{tt}$ en reprenant les tests que nous avons réalisés sur $r_{te}$.
+
+### **Histogramme**
+<div id="Histrtt"></div>
+
+On va comparer la distribution de $r_{tt}$ par rapport à une loi normale.
+
+```{r histogramme2}
+plotNormalHistogram(rtt, breaks='FD', main="Distribution de rtt par rapport à une normale", ylab="Fréquence", xlab="Valeurs")
+```
+
+Il semblerait qu'il y ait davantage de valeurs extrêmes dans la distribution de $r_{tt}$ que dans une distribution normale.
+
+
+### **Moyenne empirique nulle**
+
+On cherche à vérifier que la moyenne empirique de $r_{tt}$ (`r sprintf(mean(rtt), fmt = '%#.7f')`) est statistiquement nulle. 
+Pour cela, on réalise le test t de Student :
+
+```{r t test2}
+t.test(rtt)
+```
+
+La $p-value$ est de $0.1022 > 0.05$. On accepte donc $H_0$ : la moyenne empirique de $r_{tt}$ est statistiquement nulle.
+
+
+## **I. Asymétrie perte/gain**
+
+On réalise le test d'agostino :
+
+```{r Agostino2}
+agostino.test(rtt)
+```
+
+La valeur de la skewness obtenue est $-0.3866$ environ et la $p-value$ est de $9.029e-08 < 0.05$. 
+On rejette donc $H_0$ : la skewness n'est pas statistiquement nulle et la distribution n'est pas symétrique.
+
+**Propriété 1: non validée**
+
+## **II. Queues de distribution épaisses**
+
+On réalise le test d'anscombe :
+
+```{r anscombe2}
+anscombe.test(rtt)
+```
+La valeur du kurtosis obtenue est $9.622$ et la $p-value$ est $<2.2*10^{-16} < 0.05$. 
+On rejette donc $H_0$ : le kurtosis est donc significativement différent de 3. 
+Puisque la valeur obtenue est supérieure à 3, la distribution est leptokurtique, on a donc des queues de distribution plus épaisses qu'une loi normale dues à la présence de valeurs extrêmes.
+
+**Propriété 2: validée**
+
+## **III. L'autocorrélation des carrées des rendements**
+### **ACF**
+
+
+```{r ACF2}
+op<-par(mfrow=c(2,1))
+Acf(rtt,main='ACF du rendement logarithmique')
+Acf(rtt^2,main='ACF du rendement logarithmique au carré')
+par(op)
+```
+
+L'ACF nous permet de voir les coefficients d'autocorrélation $\rho$ des rendements logarithmiques et des rendements logarithmiques au carré. 
+Pour les rendements logarithmiques, on a $\rho(6)$, $\rho(7)$, $\rho(9)$, $\rho(12)$, $\rho(14)$, $\rho(17)$ significatifs, donc on a de faibles autocorrélations à ces ordres.
+Pour les rendements logarithmiques au carré, on a presque tous les rho significatifs, donc on a de l'autocorrélation forte à presque tous les ordres. 
+
+
+### **Ljung box**
+
+On réalise également le test de Ljung-Box.
+
+Pour l'autocorrélation faible :  
+```{r LB rtt}
+Box.test(rtt, lag = 1, type="Ljung-Box")
+```
+Pour lag = 1, la $p-value$ est de $0.22 > 0.05$. On accepte donc l’hypothèse nulle d’absence d’autocorrélation pour $r_{tt}$.
+
+Pour l'autocorrélation forte :  
+```{r LB rtt2}
+Box.test(rtt^2, lag = 1, type="Ljung-Box")
+```
+Pour lag = 1, la $p-value$ est de $0.01826 < 0.05$. On rejette donc l’hypothèse nulle d’absence d’autocorrélation pour $r_{tt}^2$ et on conclut qu'il y a de l'autocorrélation dès l'ordre 1 sur les carrés des rendements.
+
+
+### **EACF**
+
+Pour modéliser l'autocorrélation dans $r_{tt}$, nous utilisons un modèle ARMA(p,q).
+
+```{r eacf2}
+eacf(rtt)
+```
+L'EACF nous donne (p, q) = (2, 12) comme valeurs de départ.
+On estime donc un ARMA(2,12). 
+
+Mais on va chercher le meilleur modèle en faisant augmenter les valeurs de p et de q:
+
+### **Modèles testés**
+
+```{r test2 coefficients }
+  reg1 = Arima(rtt, order = c(0,0,1)) # MA(1)
+  coeftest(reg1)
+  # pas bon modèle 
+  
+  reg2 = Arima(rtt, order = c(0,0,2)) # MA(2)
+  coeftest(reg2)
+  # pas bon modèle 
+  
+  reg3 = Arima(rtt, order = c(0,0,3)) # MA(3)
+  coeftest(reg3)
+  # pas bon modèle 
+  
+  reg4 = Arima(rtt, order = c(0,0,4)) # MA(4)
+  coeftest(reg4)
+  
+  # pas bon modèle 
+  
+  reg5 = Arima(rtt, order = c(0,0,5)) # MA(5)
+  coeftest(reg5)
+  # pas bon modèle
+  
+  reg6 = Arima(rtt, order = c(1,0,1)) # ARMA(1,1)
+  coeftest(reg6)
+  # mauvais modèle
+  
+  reg7 = Arima(rtt, order = c(1,0,2)) # ARMA(1,2)
+  coeftest(reg7)
+  reg7 = Arima(rtt, order = c(1,0,2),fixed=c(0,0,NA,NA)) 
+  coeftest(reg7)
+  # pas bon modèle
+  
+  reg8 = Arima(rtt, order = c(2,0,2)) # ARMA(2,2)
+  coeftest(reg8)
+  # pas bon modèle
+  
+  reg9 = Arima(rtt, order = c(3,0,1)) # ARMA(3,1)
+  coeftest(reg9)
+  # pas bon modèle 
+  
+  reg10 = Arima(rtt, order = c(2,0,12)) # ARMA(2,12)
+  coeftest(reg10)
+  reg10 = Arima(rtt, order = c(2,0,12),fixed=c(0,NA,0,NA,0,0,0,NA,NA,0,NA,0,0,NA,0))
+  coeftest(reg10)
+  # bon modèle 
+  
+  reg11 = Arima(rtt, order = c(3,0,12)) # ARMA(3,12)
+  coeftest(reg11)
+  reg11 = Arima(rtt, order = c(3,0,11)) # ARMA(3,11)
+  coeftest(reg11)
+  # pas bon modèle 
+  
+  reg12 = Arima(rtt, order = c(2,0,11)) # ARMA(2,11)
+  coeftest(reg12)
+   # pas bon modèle 
+  
+  reg13 = Arima(rtt, order = c(2,0,10)) # ARMA(2,10)
+  coeftest(reg13)
+  # pas bon modèle 
+  
+  reg14 = Arima(rtt, order = c(2,0,9)) # ARMA(2,9)
+  coeftest(reg14)
+  reg14 = Arima(rtt, order = c(2,0,9), fixed=c(NA,NA,NA,NA,0,0,0,0,NA,NA,NA,0)) # ARMA(2,9)
+  coeftest(reg14)
+  # pas bon modèle 
+  
+  reg15 = Arima(rtt, order = c(2,0,8)) # ARMA(2,8)
+  coeftest(reg15)
+    # pas bon modèle 
+  
+  # On garde donc reg10 
+```
+
+Un modèle est considéré comme viable si l'espérance des aléas est nulle et si ceux-ci ne sont pas autocorrélés. 
+
+Pour cela, il va tester le premier critère par un test t de Student et le second par test de Ljung-Box des résidus standardisés :
+
+**On teste la viabilité du modèle**
+
+#### **t test**
+
+```{r t reg10}
+residu10<-reg10$res
+t.test(residu10)
+```
+La $p-value$ est supérieure à $0.05$. On accepte donc $H_0$ : l'espérance des aléas est nulle.
+
+
+##### **test de Ljung-Box**
+
+```{r ARCH reg10}
+  residu10<-reg10$res
+  residuv10=(residu10-mean(residu10))/sd(residu10)
+  K<-20
+  tmp10<-rep(0,K)
+  for(i in 1:K){
+    tmp10[i]<-Box.test(residuv10,lag=i,type="Ljung-Box")$p.value
+  }
+  tmp10
+```
+La $p-value$ est supérieure à $0.05$. On accepte donc l’hypothèse nulle d’absence d’autocorrélation des aléas jusqu'à l'ordre 20.
+On en conclue donc que les aléas du modèle ARMA(2,12) ne sont pas autocorrélés. 
+
+```{r BIC reg10}
+BIC(reg10)
+```
+Le BIC du modèle ARMA(2,12) est de -6230.984.
+
+**On choisit donc le modèle ARMA(2,12) car c'est le seul modèle viable que l'on a estimé.**
+
+**Propriété 3: validée**
+
+## **IV. Cluster de volatilité**
+
+Nous cherchons ici à savoir s'il existe des clusters de volatilité dans les données.
+
+```{r 2LM1}
+ArchTest(as.numeric(rtt),lag=1)
+```
+La $p-value$ est de $0.01845 < 0.05$. On rejette donc $H_0$ : présence d'effet ARCH (cluster de volatilité) à l'ordre 1.
+
+```{r 2LM2}
+ArchTest(as.numeric(rtt),lag=2)
+```
+La $p-value$ est $0.02374 < 0.05$. On rejette donc $H_0$ : présence d'effet ARCH (cluster de volatilité) à l'ordre 2.
+
+```{r 2LM20}
+ArchTest(as.numeric(rtt),lag=20)
+```
+La $p-value$ est $< 2.2e-16< 0.05$. On rejette donc $H_0$ : présence d'effet ARCH (cluster de volatilité) à l'ordre 20.
+
+**Il y a donc des clusters de volatilité dans la série $r_{tt}$.**
+
+**Propriété 4: validée**
+
+## **V. Queues épaisses conditionnelles**
+
+## **GARCH(1,1)**
+
+On estime un modèle GARCH(1,1) sur les résidus du ARMA(2,12) pour modéliser les clusters de volatilité
+
+```{r garch2}
+residuv10 =(residu10-mean(residu10))/sd(residu10)
+volat<-garch(residuv10,order=c(1,1))
+```
+
+Nous allons ensuite utiliser la fonction *garchFit* du package *fGarch* car nous obtenons FALSE CONVERGENCE.
+
+
+```{r garchFit2}
+volat = garchFit(residuv10~garch(1,1), data=rtt, trace=F, include.mean=F)
+volat
+```
+On peut voir que les p-values de $\omega$, $\alpha_1$ et $\beta_1$ sont inférieures à 5% donc on en conclut qu'ils sont tous les trois significatifs.
+
+On réalise à nouveau le test ARCH décrit dans la propriété IV pour voir si toute l'hétéroscédasticité conditionnelle à été prise en compte par le modèle GARCH(1,1).
+
+```{r arch2}
+ArchTest(volat@residuals, lag=1)
+```
+La $p-value$ est de $0.01845< 0.05$. 
+On rejette donc $H_0$ : l'hétéroscédasticité conditionnelle n'a pas été totalement prise en compte.
+
+On essaie alors d'augmenter la valeur de n ou m dans le GARCH(n,m).
+
+## **GARCH(1,2)**
+```{r 2garchFit 1,2}
+volat = garchFit(residuv10~garch(1,2), data=rtt, trace=F, include.mean=F)
+volat
+```
+La p-value de $\beta_2$ est de $1$, il n'est donc pas significatif et on ne peut donc pas utiliser de modèle GARCH(1,2)
+
+## **GARCH(2,1)**
+```{r 2garchFit 2,1}
+volat = garchFit(residuv10~garch(2,1), data=rtt, trace=F, include.mean=F)
+volat
+```
+La p-value de $\alpha_2$ est de $0.53$ environ, il n'est donc pas significatif et on ne peut pas utiliser de modèle GARCH(2,1)
+
+**Augmenter le nombre de coefficient du modèle GARCH ne donne rien de concluant, nous allons donc conserver un modèle GARCH(1,1) en tenant compte du fait que toute l'hétéroscédasticité conditionnelle n'a pas été prise en compte. nous ne peut donc pas réaliser le test d'anscombe et nous ne pouvons donc pas conclure sur les queues épaisses conditionnelles de la distribution de $r_{tt}.$**
+
+**Propriété 5: non concluant**
+
+## **VI. Effet de levier**
+
+```{r levier2}
+  sig<-rep(0,T)
+  for(t in 1:T){
+    sig[t]<-sqrt(sum(rtt[t-22]-(sum(rtt[t-22]/22)))^2/22)
+  }
+  sigma=sig[24:T]*100
+  
+  plot(log(pt[24:length(rtt)]), type='l', col=2,axes=F, xlab="", ylab="Cours de Schneider Electric (en log)", cex.lab=1.2, lwd=3, col.lab=2, main="Effet de la variation du cours sur la volatilité")
+  axis(side = 2, at = pretty(range(log(pt[24:length(rtt)]))), col=2) #axe de gauche
+  par(new=T)
+  plot(sigma, col="grey",type='l',axes = F,xlab="", ylab="") 
+  axis(side = 4, at = pretty(range(sigma)), col="grey")      #axe de droite
+  mtext("Volatilité du cours de Schneider Electric", side = 4, line = 3, col="grey", cex=1.2)
+  title(xlab="Période étudiée (2020-2024)", line=0, cex.lab=1.2)
+    
+```
+
+Selon le graphique il semble que la volatilité de la plus grande baisse soit supérieure à la plus grande hausse. 
+**On a donc bien un effet de levier sur $r_{tt}$.**
+
+**Propriété 6: validée**
+
+## **VII. Saisonnalité**
+
+### **Effet week-end**
+
+
+```{r jours2}
+
+# Création du tableau des résultats avec 5 colonnes pour les jours de la semaine
+tableaures <- data.frame(matrix(NA, ncol=5, nrow=4))
+colnames(tableaures) <- c("lundi", "mardi", "mercredi", "jeudi", "vendredi")
+rownames(tableaures) <- c("moyenne en %", "écart-type annuel en %", "skewness", "kurtosis")
+
+# Extraction des dates et conversion des jours en format français
+datesp <- df_yf$ref_date
+dates <- datesp[-1]  # Suppression de la première valeur manquante
+
+# Conversion des dates en jours de la semaine
+jour <- format(dates[1:T], format = "%A")
+jour[which(jour == "Monday")] <- "lundi"
+jour[which(jour == "Tuesday")] <- "mardi"
+jour[which(jour == "Wednesday")] <- "mercredi"
+jour[which(jour == "Thursday")] <- "jeudi"
+jour[which(jour == "Friday")] <- "vendredi"
+
+# Vérification des valeurs non manquantes et calcul pour chaque jour
+
+# Lundi
+rtlun <- as.numeric(rtt[jour == "lundi"])
+if (!all(is.na(rtlun))) {
+  tableaures[1, 1] <- mean(rtlun, na.rm = TRUE) * 100
+  tableaures[2, 1] <- sd(rtlun, na.rm = TRUE) * 100 * sqrt(252)
+  tableaures[3, 1] <- skewness(rtlun, na.rm = TRUE)
+  tableaures[4, 1] <- kurtosis(rtlun, na.rm = TRUE)
+}
+
+# Mardi
+rtmar <- as.numeric(rtt[jour == "mardi"])
+if (!all(is.na(rtmar))) {
+  tableaures[1, 2] <- mean(rtmar, na.rm = TRUE) * 100  # moyenne journalière en %
+  tableaures[2, 2] <- sd(rtmar, na.rm = TRUE) * 100 * sqrt(252)  # écart-type annualisé en %
+  tableaures[3, 2] <- skewness(rtmar, na.rm = TRUE)  # skewness
+  tableaures[4, 2] <- kurtosis(rtmar, na.rm = TRUE)  # kurtosis
+}
+
+# Mercredi
+rtmer <- as.numeric(rtt[jour == "mercredi"])
+if (!all(is.na(rtmer))) {
+  tableaures[1, 3] <- mean(rtmer, na.rm = TRUE) * 100
+  tableaures[2, 3] <- sd(rtmer, na.rm = TRUE) * 100 * sqrt(252)
+  tableaures[3, 3] <- skewness(rtmer, na.rm = TRUE)
+  tableaures[4, 3] <- kurtosis(rtmer, na.rm = TRUE)
+}
+
+# Jeudi
+rtjeu <- as.numeric(rtt[jour == "jeudi"])
+if (!all(is.na(rtjeu))) {
+  tableaures[1, 4] <- mean(rtjeu, na.rm = TRUE) * 100
+  tableaures[2, 4] <- sd(rtjeu, na.rm = TRUE) * 100 * sqrt(252)
+  tableaures[3, 4] <- skewness(rtjeu, na.rm = TRUE)
+  tableaures[4, 4] <- kurtosis(rtjeu, na.rm = TRUE)
+}
+
+# Vendredi
+rtven <- as.numeric(rtt[jour == "vendredi"])
+if (!all(is.na(rtven))) {
+  tableaures[1, 5] <- mean(rtven, na.rm = TRUE) * 100
+  tableaures[2, 5] <- sd(rtven, na.rm = TRUE) * 100 * sqrt(252)
+  tableaures[3, 5] <- skewness(rtven, na.rm = TRUE)
+  tableaures[4, 5] <- kurtosis(rtven, na.rm = TRUE)
+}
+
+# Affichage du tableau final des résultats
+tableaures
+
+```
+
+**Conclusion**: L’écart type du lundi n’est pas le plus grand (c'est celui du mercredi) et l’écart-type n’augmente pas à partir du mercredi mais dès le lundi jusqu'au mercredi. 
+Donc il semble qu'il n'y ait à priori pas d'effet week-end.
+
+
+### **Effet janvier**
+
+Nous regardons maintenant les données mensuelles.
+
+```{r mois2}
+monthplot(rtt, ylab="rendement",main="", cex.main=1,col.base=2,lwd.base=3)
+```
+
+Les moyennes de janvier, d’avril sont les plus élevées alors que celle de décembre n'en fait pas partie, mais la volatilité de janvier n’est pas la plus élevée. 
+Donc il semble qu'il n’y ait pas d’effet janvier dans $r_{te}$.
+
+**Propriété 7: non validée**
+
+
+## **VIII. Stationnarité**
+
+Nous allons réaliser 4 tests de racines unitaires pour trouver le processus générateur des données (PGD) de la série $r_{tt}$. 
+
+Les tests de racines unitaires que nous allons réaliser sont :  
+  - Le test de Dickey-Fuller  
+  - Le test de Dickey-Fuller Augmenté  
+  - Le test de Zivot et Andrews  
+  - Le test de Lee et Strazicich  
+
+Le modèle de Lee et Strazicich est le plus récent et le plus complet, donc le plus efficace et c'est donc celui qui nous permettra de conclure sur la stationnarité de notre série.
+
+## **Dickey-Fuller**
+
+Dans le test de Dickey-Fuller, il existe trois spécifications possibles sachant qu'une seule est la bonne pour une série particulière : 
+
+- **Trend**
+- **Drift**
+- **None**
+
+#### **Trend**
+
+```{r DF trend2}
+summary(ur.df(rtt,type="trend",lag=0))
+```
+
+La $p-value$ de $\beta_1$ est de 0.798  > 0,05. On accepte donc $H_0$ : $\beta_1 = 0$. 
+On passe donc à la spécification drift puisque trend n'est pas la bonne.
+
+
+#### **Drift**
+
+```{r DF drift2}
+summary(ur.df(rtt,type="drift",lag=0))
+```
+
+La $p-value$ de $\beta_0$ est de 0.0958 > 0,05. On accepte donc $H_0$ : $\beta_0 = 0$. 
+On passe donc à la spécification none puisque drift n'est pas la bonne.
+
+#### **None**
+
+```{r DF none2}
+summary(ur.df(rtt,type="none",lag=0))
+```
+La statistique t calculée pour $(\rho-1)$ = -35.9631  < -1.95 , on rejette $H_0$ et le processus qui a généré nos données est stationnaire. 
+
+Cependant, cette conclusion n'est valable que si les aléas $\epsilon_t$ ne sont pas autocorrélés. 
+Testons cela avec l'ACF et le PACF des résidus des régressions DF.
+
+```{r plot DF2}
+plot(ur.df(rtt,type="none",lag=0)) 
+```
+
+On constate, dans le PACF, qu'il y a de l'autocorrélation des aléas puisque $a(6)$, $a(7)$ sont significatifs par exemple. 
+La conclusion de notre test DF n'est donc pas valide. Nous allons alors faire le test Dickey-Fuller Augmenté puisque celui-ci tient compte de l'autocorrélation.  
+
+
+## **Dickey-Fuller Augmenté**
+
+Le test de Dickey-Fuller Augmenté (ADF) est un test de Dickey-Fuller (DF) avec des variables explicatives en plus qui sont la variable dépendante retardée jusqu'à l'ordre P. P étant le nombre de retards que nous ajoutons dans les régressions pour tenir compte de l'autocorrélation des aléas. 
+#### **MAIC**
+
+```{r DFA MAIC2}
+pmax = as.integer(12*(T/100)^(0.25))
+summary(CADFtest(rtt, criterion='MAIC', type='none', max.lag.y=pmax))
+```
+
+"Max lag of the diff. dependent variable" indique le nombre de variable explicative à ajouter pour tenir compte de l'autocorrélation. Ici il vaut 8.
+Selon le critère MAIC, il ne nous faut donc ajouter 8 variables de retard dans le test de Dickey-Fuller. 
+
+
+#### **Procédure de Perron**
+
+La procédure de Perron nous donne 8 variables à ajouter pour tenir compte de l'autocorrélation.
+On réalise donc à nouveau le test de Dickey-Fuller avec 8 variables de retard selon BIC. 
+On diminue le nombre de gamma jusqu'à que le dernier gamma ait une statistique t en valeur absolue > 1.64.
+
+```{r 2ADFrte Perron 8}
+pmax <- as.integer(12*(T/100)^(0.25))
+summary(ur.df(rtt,type="none",lag= 8))
+```
+La $t-value$ en valeur absolue de $\gamma_{8}$ = 2.249 > 1,64 donc on garde 8 variables de retard.
+
+La statistique t calculée pour $(\rho-1)$ = -10.6637 < -1.95, on rejette $H_0$ et le processus qui a généré nos données est stationnaire. 
+
+On va maintenant passer aux tests prenant en compte des changements structurels, en commençant par Zivot et Andrews.
+
+## **Zivot et Andrews**
+
+Le test de Zivot et Andrews qui permet de prendre en compte un point de rupture dans la série.
+
+#### **Procédure de Perron**
+
+On part de lag = pmax ici.
+
+On diminue la valeur du lag jusqu’à ce que le dernier gamma ait une statistique t en valeur absolue < 1.6 et l’avant dernier une statistique t en valeur absolue > 1.6
+
+```{r 2ZArte Perron pmax}
+summary(ur.za(rtt, model="both",lag=pmax))
+```
+
+La $t-value$ de $\gamma_{26}$ =  1.519 < 1.64 et la $t-value$ de $\gamma_{25}$ =  0.012 < 1.64 en valeur absolue donc on retire une variable de retard.
+
+```{r 2ZArte Perron pmax-1}
+summary(ur.za(rtt, model="both",lag=pmax-1))
+```
+
+La $t-value$ de $\gamma_{25}$ =  1.559 < 1.64 et la $t-value$ de $\gamma_{24}$ =  1.683 > 1.64 en valeur absolue donc garde 25 variables de retard.
+
+La $p-value$ de $\delta1$ est de 7.35e-09 < 0.05 donc $\delta1$ est significatif.
+
+La $p-value$ de $\delta2$ est de 1.46e-05  < 0.05 donc $\delta2$ est significatif.
+
+La spécification **both** est donc la bonne.
+
+La statistique de test est -8.5989 < -5.08 la valeur critique à 5% . 
+On rejette $H_0$ : $\mid\rho\mid < 1$.
+
+La conclusion de ce test est que le PGD est TS avec une date de rupture, ce qui ne nous permet pas de conclure que la série est stationnaire (elle peut avoir une racine unitaire et des changements structurels). 
+Nous allons passer au test de Lee et Strazicich qui est plus performant et qui sera celui dont on tirera la conclusion sur le PGD de notre série.
+
+## **Lee et Strazicich**
+
+Comme nous avons plus de 100 observations nous n’utiliserons pas “bootstrap” dans le test de Lee et Strazicich.
+
+Le test de Lee et Strazicich est une généralisation du test de racine unitaire de Schmidt et Phillips.
+
+Le modèle final que l'on va alors conserver est le modèle **break** (car correspond au modèle **both** obtenu au test ZA) avec $lag=26$, à une date de rupture et sans employer de bootstrap).
+
+```{r source LS2}
+source("./LeeStrazicichUnitRootTest.R", encoding = 'UTF-8')
+```
+
+```{r LS2}
+myBreaks = 1
+myModel = "break"
+myLags = 26
+myLS_test = ur.ls(y=rtt, model=myModel, breaks = myBreaks, lags = myLags, method = "GTOS",
+                  pn = 0.1, print.result = "print")
+```
+La valeur de la statistique de test est -10.55272 .  
+Le $\lambda$ estimé est 0.1 ce qui donne $T_B=150$ donc la date de rupture correspond à `r df_yf[150-1,]$ref_date`.  
+La valeur critique au seuil de risque de 5% vaut -4,50.  
+On a -10.55272 < -4,50. 
+
+On rejette donc $H_0$ : absence de racine unitaire. Le PGD est TS avec une date de rupture. 
+
+**En conclusion, le PGD qui a généré notre série est stationnaire.**
+
+**Propriété 8: validée**
