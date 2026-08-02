@@ -906,6 +906,19 @@ Le dossier `donnees` contient donc une copie locale des données utilisées afin
 
 ---
 
+# Avertissement
+
+Ce dépôt présente un travail académique réalisé à des fins pédagogiques.
+
+Il ne constitue :
+
+- ni un conseil en investissement ;
+- ni une recommandation d’achat ou de vente ;
+- ni une mesure exhaustive du risque financier ;
+- ni une garantie concernant les pertes futures.
+
+---
+
 # Auteur
 
 **Benjamin Baillet**
