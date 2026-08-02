@@ -1,0 +1,1880 @@
+---
+title: "Projet 2: Value at Risk des rendements logarithmiques de l'action Schneider Electric suivi de Backtesting pour vérifier la précision de cette estimation"
+author: "BAILLET Benjamin"
+date: "2024-11-13"
+output: 
+  html_document:
+    theme: cosmo
+    number_sections: no
+    toc: yes
+    toc_float: yes
+    code_folding: hide
+  pdf_document:
+    toc: yes
+editor_options:
+  chunk_output_type: console
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r librairies, include=FALSE}
+library(yfR)
+library(ghyp)
+library(SkewHyperbolic)
+library(rugarch)
+library(parallel)
+library(zoo)
+library(PerformanceAnalytics)
+```
+
+# **Résultats obtenus**
+
+Le **meilleur modèle** pour notre série est un **ARMA(0,5)-APARCH(1,1) avec un distribution nig et delta=1, ma3=0, mu=0,  ma1=0**
+
+<html>
+<head>
+  <style>
+    table {
+      border-collapse: collapse;
+    }
+
+    table, th, td {
+      border: 1px solid black;
+    }
+
+    th, td {
+      padding: 10px;
+      text-align: center;
+    }
+
+    th {
+      background-color: #000080; /* Navy Blue */
+      color: white; /* White text for contrast */
+    }
+  </style>
+</head>
+<body>
+
+<table>
+  <tr>
+    <th>Méthode d'estimation de la VaR</th>
+    <th>Var estimée</th>
+    <th>Nombre de violations théorique</th>
+    <th>Nombre de violations empirique</th>
+    <th>P-value du test de Kupiec</th>
+    <th>P-value du test de Christoffersen</th>
+  </tr>
+  
+  <tr>
+    <th>VaR Paramétrique</th>
+    <td></td>
+    <td>62,5</td>
+    <td>62</td>
+    <td>0.948</td>
+    <td>0.275</td>
+  </tr>
+  
+  <tr>
+    <th>VaR Normale</th>
+    <td>2.911399% </td>
+    <td>62</td>
+    <td>66</td>
+    <td>0.6572287</td>
+    <td>0.07030575</td>
+  </tr>
+  
+  <tr>
+    <th>VaR de Cornish-Fisher</th>
+    <td>2.844005%</td>
+    <td>62</td>
+    <td>67</td>
+    <td>0.5680130</td>
+    <td>0.07719156</td>
+  </tr>
+  
+  <tr>
+    <th>VaR Historique</th>
+    <td>2.961336%</td>
+    <td>62</td>
+    <td>65</td>
+    <td>0.7520836</td>
+    <td>0.06263415</td>
+    
+</table>
+</body>
+</html>
+
+**En moyenne la VaR paramétrique est de 2.82% environ sur rtt**.
+
+# **Introduction**
+
+**Ce projet vise à évaluer la Value at Risk de l'action Schneider Electric. Puis par le biais du backtesting, nous vérifierons la précision de cette estimation.**
+
+
+```{r données, message=FALSE}
+
+my_ticker <- 'SU.PA'
+first_date <- "2010-01-04"
+last_date <-"2024-11-13"
+
+# fetch data
+df_yf <- yf_get(tickers = my_ticker, 
+                first_date = first_date,
+                last_date = last_date,
+                freq_data='daily',type_return='log')
+
+pt<-df_yf$price_adjusted
+dpt=diff(pt)
+rt=df_yf$ret_adjusted_prices[-1]
+
+N<-length(rt) 
+
+datesp<-df_yf$ref_date
+dates<-datesp[-1]
+
+# dates[2555] => 31/12/2019 = dernière date de 2019
+# dates[2556]  => 02/01/2020 = première date de 2020
+
+rte=rt[1:2555] #rt sur l'ensemble d'estimation de 2010 à 2019 inclus
+rtt=rt[2556:N] #rt sur l'ensemble de test de 2020 à 2024 inclus
+
+T<-length(rte)  #nombre d'observations dans l'ensemble d'estimation 
+Q<-length(rtt)  #nombre d'observations dans l'ensemble de test 
+
+datesp<-df_yf$ref_date
+dates<-datesp[-1] # -1 pour la première valeur manquante 
+```
+
+## **Notations**
+
+- VaR: Value at Risk
+-   $p_t$ : le cours de l'action Schneider Electric à la date t (qui est un jour ouvré à la bourse)
+-   $dp_t = p_t - p_{t-1}$ : les variations du cours de Bourse de l'action Schneider Electric
+-   $r_t=log(p_t)-log(p_{t-1})$ : le rendement logarithmique de l'action   
+On sépare les données en deux ensembles $r_{tt}$ et $r_{te}$ contenant des années complètes et de telle sorte que le premier comprend environ 2/3 des données les plus vieilles (2010-2019) et le deuxième 1/3 des données les plus récentes (2020- novembre 2024):
+-   $r_{te}$ : ensemble d'estimation : 04/01/2010 - 31/12/2019
+-   $r_{tt}$ : ensemble de test : 02/01/2020 - 13/11/2024
+
+
+## **Chronogramme**
+
+```{r chronogramme1}
+
+datesp<-df_yf$ref_date
+first_day_of_year = NULL
+for (i in 1:15) {
+  first_day_of_year[i] = as.character(datesp[format(datesp, "%Y") == 2009+i][1])
+}
+
+plot(datesp, pt, type='l', ylab="Cours de Schneider Electric (€)", xlab="Temps", cex.main=1.5, main="Evolution du cours de l'action de Schneider Electric", xaxt = "n")
+
+axis(side = 1, at=as.Date(first_day_of_year), labels=format(as.Date(first_day_of_year), "%Y"))
+
+fit0 = lm(pt ~ datesp)
+abline(fit0, col="red")
+
+```
+
+Le cours de l'action a progressé de 40 euros en 2010 à plus de 250 euros en 2024, soit une multiplication par plus de 6 fois. Cela représente une performance remarquable sur le long terme. On peut voir sur ce graphique que le cours de l'action a une tendance croissante et celle-ci a été réprésentée en rouge par le biais d'une régression linéaire. De plus la forte volatilité entre 2020 et 2024 indique une période où les marchés ont réagi à des événements globaux (comme la pandémie de COVID).
+
+## **Problématiques**
+
+Nous chercherons à identifier la distribution appropriée pour nos aléas, en utilisant un modèle ARMA-GARCH pour modéliser de manière optimale la moyenne conditionnelle et la volatilité conditionnelle. 
+Ensuite, nous évaluerons la performance de ce modèle à travers le backtesting, afin de garantir une estimation correcte de la Value at Risk paramétrique. Enfin, nous nous intéresserons à la VaR normale, la VaR de Cornish-Fisher, ainsi que la VaR historique.
+
+
+## **ARMA-GARCH**
+
+### **Modèle ARMA**
+
+**AR** :  
+
+Un modèle AR(p) (autorégressif d'ordre p) s'écrit :  
+<center>$$X_t = c +\sum_{i=1}^p  \phi_iX_{t-i} +\varepsilon_t$$</center><br>
+avec :  
+$\phi_1,\dots,\phi_p$: les paramètres du modèle ;  
+$c$: une constante ;  
+$\varepsilon_t$: un bruit blanc.
+
+<br>
+
+**MA** :  
+
+Un modèle MA(q) (moving average ou moyenne mobile d'ordre q) s'écrit :  
+<center>$$X_t=\varepsilon_t + \sum_{i=1}^q\theta_i\varepsilon_{t-i}$$</center><br>
+avec :  
+$\theta_i,\dots,\theta_q$: les paramètres du modèle ;  
+$\varepsilon_t,\varepsilon_{t-1}, \dots, \varepsilon_q$: des termes d'erreurs. 
+Ces derniers sont supposés indépendants et identiquements distribués selon une loi normale de moyenne nulle.  
+
+**ARMA** :  
+
+Un modèle ARMA(p,q) est un modèle autorégressif et moyenne mobile d'ordre (p,q) :
+<center>$$X_t=\varepsilon_t+\sum_{i=1}^p \phi_i X_{t-i} + \sum_{i=1}^q \theta_i \varepsilon_{t-i}$$</center><br>
+
+Nous allons dans un premier temps travailler sur un modèle ARMA(1,1) et si celui-ci ne permet pas de prendre en compte l'autocorrélation des aléas, nous passerons au modèle ARMA(0,5) obtenu dans le projet 1.
+
+### **Modèle GARCH**
+
+Le modèle autorégressif conditionnellement hétéroscédastique généralisé (GARCH) permet de capter le comportement de la volatilité dans le temps.  
+
+Nous allons étudier **6 modèles GARCH** pour trouver celui qui est le plus adapté à nos données. Nous allons tester un par un les modèles en choisissant une distribution appropriée pour nos données. Nous n'allons pas prendre en compte la saisonnalité car dans le projet 1 nous n'avons vu qu'il n'y en a ni pour $rt_e$ ni pour $rt_t$.
+
+On partira, pour chacun des modèles, d'un GARCH(m,s) avec $m=s=1$.
+
+
+# **Modèle ARMA GARCH**
+
+On va, dans un premier temps trouver la distribution la plus adaptée à nos données $r_{te}$.
+
+```{r qqplot normale}
+
+qqnorm(rte)
+qqline(rte, col = 2)
+
+```
+
+La majorité des points se trouvent proches de la ligne rouge (la ligne de référence pour une distribution normale). Cela suggère que les données observées suivent en grande partie une distribution normale. Cependant, on voit sur le graphique à quel point les queues de la distribution sont éloignées de la normale en rouge. On retrouve le résultat trouvé dans le projet 1, c'est à dire des queues de distribution épaisses.
+
+On va donc s'intéresser à des distributions à queues épaisses et asymétriques (résultat du projet 1) :
+
+- Student asymétrique  **(sstd)**
+- Gaussienne inverse asymétrique **(nig)**  
+- Hyperbolique asymétrique  **(hyp)**
+- Hyperbolique généralisée asymétrique **(ghyp)**
+- Hyperbolique généralisée skew t  **(ghst)**
+  
+```{r plot distri}
+
+# estimation distribution normale
+fitn<-fit.gaussuv(data=rte)
+summary(fitn)
+
+# estimation student asymtrique
+fitstu<-fit.tuv(rte,silent=T)
+summary(fitstu)
+
+# gaussienne inverse asymétrique
+fitnig<-fit.NIGuv(data=rte,silent=T)
+summary(fitnig)
+
+# hyperbolique asymétrique
+fithyp<-fit.hypuv(rte,silent=T)
+summary(fithyp)
+
+# hyperbolique généralisée asymétrique
+fitghypuv<-fit.ghypuv(rte,silent=T)
+summary(fitghypuv)
+
+plot(fithyp,col=4, type='l', ylab="Densité", xlab="")
+lines(fitstu,col=2) #student
+lines(fitnig,col=3) # estimateur de la densité de rte
+lines(density(rte),col=1)
+lines(fitghypuv,col=5)
+
+legend("topleft",legend =c("rte","student","nig","hyp","ghyp"), col =1:5,lty=rep(1,5))
+title(main="Comparaison de la distribution de rte")
+```
+
+Parmi toutes les distributions, c'est la **nig** qui se rapproche le plus de celle de rte.
+
+```{r ghst}
+
+ghstfit<-skewhypFit(rte, print = FALSE, plot =FALSE, hessian = TRUE)
+summary(ghstfit)
+
+```
+
+
+```{r plot ghst}
+
+ghstfit<-skewhypFit(rte, print = FALSE, plot =FALSE, hessian = TRUE)
+
+op <- par(mfrow = c(1,2))
+plot(ghstfit, which = 1, xlab="Observations", ylab="Densité")
+plot(ghstfit, which = 3)
+par(op)
+```
+
+La distribution Hyperbolique généralisée skew t (ghst) semble également être adaptée. 
+On va tester la **gaussienne inverse asymétrique (nig)** ainsi que la distribution **hyperbolique généralisée skew t (ghst)** avec les différents modèles GARCH afin de retenir la meilleure distribution.
+
+On prendra en compte les deux distributions quand testera les modèles GARCH :
+
+## **Les tests et les hypothèses des modèles GARCH** 
+
+<html>
+<head>
+  <style>
+    table {
+      border-collapse: collapse;
+    }
+
+    table, th, td {
+      border: 1px solid black;
+    }
+
+    th, td {
+      padding: 10px;
+      text-align: center;
+    }
+
+    th {
+      background-color: #ccc;
+    }
+
+    td {
+      background-color: #001f3f;
+      color: white;
+    }
+  </style>
+</head>
+<body>
+
+<table>
+  <tr>
+    <th>Test</th>
+    <th>Statistique</th>
+    <th>Hypothèse</th>
+    <th>Distribution sous $H_0$</th>
+    <th>Règle de décision</th>
+  </tr>
+  
+  <tr>
+    <th>Significativité des coefficients sur les <i>Robust Standard Errors</i></th>
+    <td><b>t de Student</b> <br> $t=\frac{|m(e)|}{\sigma_e} \times \sqrt{T}$<br>
+    avec : <br>
+    T: le nombre d’observations ; <br>  
+    $m(e)$: la moyenne des résidus de la régression ; <br>  
+    $\sigma_e$: l'écart type des résidus ;</td>
+    <td>$H_0$ : le coefficient est significatif dans la régression <br> $H_a$ : le coefficient n'est pas significatif</td>
+    <td>$t \sim N(0,1)$</td>
+    <td>On accepte lorsque la p-value est supérieure à 5%</td>
+  </tr>
+  
+  <tr>
+    <th>Autocorrélation des aléas</th>
+    <td><b>Ljung-Box</b> <br>$Q_K = T \times (T+2) \sum_{k=1}^{K} \frac{\hat \rho (k)^2}{T-K}$ <br> avec T, le nombre d’observations</td>
+    <td>$H_0:\rho_1=\rho_2=\rho_3=...=\rho_k\rightarrow$ Absence d'autocorrélation jusqu'à l'ordre k<br> $H_a$ : au moins un $\rho_i \ne 0$ $\rightarrow$ Présence d'autocorrélation</td>
+    <td>$Q_K \underset{T\to +\infty}\longrightarrow \chi^2$</td>
+    <td>On accepte lorsque la p-value est supérieure à 5%</td>
+  </tr>
+  
+  <tr>
+    <th>Homoscédasticité conditionnelle des aléas</th>
+    <td><b>Engle</b> <br> Estimer $\varepsilon_t$ par MCO $e_t^2 = a+c_1e_{t-1}^2+c_2e_{t-2}^2 + \dots + c_pe_{t-p}^2 + erreur_t$ <br> statistique : $LM = T \times R^2$ avec $R^2$ le coefficient de détermination associé à l’estimation de l'équation et T, le nombre d'observations</td>
+    <td>$H_{0}:\alpha_{1}=\alpha_{2}=\dots=\alpha_{P}=0$ : pas d'effets ARCH et homoscédasticité conditionnelle <br> $H_{a}:\alpha_{i}\ne0\;avec\;i\ne0$ : présence d'effets ARCH et hétéroscédasticité conditionnelle</td>
+    <td>$LM \sim \chi^2(p)$</td>
+    <td>On accepte lorsque la p-value est supérieure à 5%</td>
+  </tr>
+  
+  <tr>
+    <th>Stabilité individuelle et jointe des paramètres du modèle dans le temps</th>
+    <td><b>Nyblom</b></td>
+    <td>$H_{0}$ : le paramètre est stable dans le temps <br> $H_{a}$ : le paramètre varie dans le temps</td>
+    <td></td>
+    <td>On accepte lorsque la valeur estimée du paramètre est inférieure à la valeur tabulée (à 5%)</td>
+  </tr>
+  
+  <tr>
+    <th>Effet de levier</th>
+    <td><b>Sign Bias Test d’Engle et Ng</b> <br> Estimer $\tilde v_t^2 = c_0+c_1I_{\tilde v_{t-1}<0}+c_2I_{\tilde v_{t-1}<0}\tilde v_{t-1}+c_3I_{\tilde v_{t-1}\ge0}\tilde v_{t-1}+u_t$  et on testera la nullité de $c_1$, $c_2$, $c_3$ et des 3 à la fois par un t de Student</td>
+    <td>On a respectivement 4 hypothèses : <br> $H_{0}:c_1=0$ : pas d'effet signe <br> $H_{0}:c_2=0$ : pas d'effet taille d'un choc < 0 <br> $H_{0}:c_3=0$ : pas d'effet taille d'un choc > 0 <br>$H_{0}:c_1=c_2=c_3=0$ : pas d'effet de levier</td>
+    <td>$t \sim N(0,1)$</td>
+    <td>On accepte lorsque la p-value est supérieure à 5%</td>
+  </tr>
+  
+  <tr>
+    <th>Adjusted Pearson Goodness of fit test</th>
+    <td><b>Pearson</b></td>
+    <td>$H_0$ : adéquation des 2 distributions <br> $H_a$ : les 2 distributions ne sont pas en adéquation</td>
+    <td></td>
+    <td>On accepte lorsque p-values sont supérieures à 5%</td>
+  </tr>
+
+</table>
+</body>
+</html>
+
+**Procédure**: On regarde les pvalues dans Robust Standard Errors et lorsqu'il y a des pvalues > 5% (excepté celle de $\alpha_0$ dont on tient pas compte si $\alpha_0$ > 0), on supprime le coefficient donc la pvalue est la plus élevée et on s'arrête lorsqu'on ne peut plus enlever de coefficients (shape et skew ne peuvent pas être retirés par exemple) ou lorsque toutes les pvalues sont inférieures à 5% ou lorsque $\alpha_0$ vaut 0.
+
+- Quand toutes les pvalues sont inférieures à 5%, le modèle est correct.
+- Quand toutes les pvalues sont inférieures à 5% sauf skew et/ou shape, le modèle est incorrect.
+- Quand toutes les pvalues sont inférieures à 5% et que $\alpha_0$ vaut 0, le modèle est incorrect car il faut que $\alpha_0$ soit stictement supérieur à 0.
+
+**Dans cette partie on garde uniquement la dernière spécification et toutes les autres testées ont été mises en annexe.**
+
+## **APARCH** 
+
+Nous allons commencer par estimer un modèle APARCH sur les deux distributions précédentes que l'on veut tester et les comparer pour trouver la meilleure. Nous choisirons celle qui a le plus grand nombre de p-values > 5% dans le test de Pearson.
+
+Un processus $v_t$ satisfait une représentation APARCH(m,s) ssi :
+
+<center> $r_t = \mu+v_t$ </center>
+<center> $v_t=\sigma_t\varepsilon_t$ </center>
+<center> $$\sigma_t^\delta=\alpha_0+\sum_{i=1}^m\alpha_i(\vert v_{t-i}\vert -\gamma_iv_{t-i})^\delta+\sum_{j=1}^s\beta_j\sigma_{t-j}^\delta$$ </center>
+
+avec :  
+$\alpha_0 \gt 0$  
+$\alpha_i \ge 0 \ \forall i \in \{1,\dots,m\}$  $  
+$-1 \lt \gamma_i \lt 1 \ \forall i \in \{1,\dots,m\}$  
+$\beta_j \ge 0 \ \forall j \in \{1,\dots,s\}$  
+$\delta \gt 0$ et plus spécifiquement $\delta \in \{1,2\}$  
+
+### **Gaussienne inverse asymétrique**
+
+```{r ap nig 8}
+
+spec1 = ugarchspec(variance.model=list(model="apARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(0,5)),distribution.model="nig",fixed.pars=list(delta=1, ma3=0, mu=0,  ma1=0))
+fit1= ugarchfit(spec = spec1,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit1)
+
+```
+
+- Tous les coefficients restants sont significatifs car leur p-value est inférieure à 5%.
+
+- On regarde le test de Ljung-Box sur les résidus standardisés pour évaluer l’autocorrélation des aléas. Les p-values sont supérieures à 5%, donc on accepte $H_0$, ainsi l’autocorrélation est bien prise en compte.
+
+- On regarde la présence d’effets ARCH (hétéroscédasticité conditionnelle) avec le test d’Engle. Les p-values pour les lag 3, 5 et 7 sont toutes supérieures à 5% donc on accepte $H_0$: homoscédasticité conditionnelle.
+
+- On regarde le test de stabilité dans le temps de Nyblom. La valeur de la statistique jointe est supérieure à 2.32 la valeur tabulée à 5% donc il y a au moins un coefficient qui n’est pas stable dans le temps. On peut voir que les statistiques de $\alpha_0$ ,$\alpha_1$, $\beta_1$ skew, shape sont supérieures à 0.47 la valeur tabulée des statistiques individuelles. On rejette donc $H_0$ pour ces coefficients et ils ne sont pas stables dans le temps. Cependant, pour remédier à cela, il faudrait réaliser un modèle à changement de régime, que nous ne traiterons pas. Nous allons donc continuer avec ce modèle.
+
+- On regarde l’effet de levier par le test d’Engle et Ng. La p-value de l’effet joint est supérieure à 5%. On accepte donc la 4ème hypothèse nulle : Il n’y a pas d’effet de levier (ni signe ni taille).
+
+- Le test de goodness-of-fit de Pearson nous donne les 4 p-values supérieures à 5%.
+
+**Ce modèle est correct mais il reste à voir si la distribution hyperbolique généralisée skew t est meilleure**
+
+Son BIC vaut **-5.3947**.
+
+### **Hyperbolique généralisée skew t**
+
+
+```{r ap ghst 7}
+
+spec1 = ugarchspec(variance.model=list(model="apARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(0,5)),distribution.model="ghst", fixed.pars=list(delta=1,  ma3=0, ma1=0))
+fit1= ugarchfit(spec = spec1,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit1)
+
+```
+
+- Tous les coefficients restants sont significatifs car leur p-value est inférieure à 5%.
+
+- On regarde le test de Ljung-Box sur les résidus standardisés pour évaluer l’autocorrélation des aléas. Les p-values sont supérieures à 5%, donc on accepte $H_0$, ainsi l’autocorrélation est bien prise en compte.
+
+- On regarde la présence d’effets ARCH (hétéroscédasticité conditionnelle) avec le test d’Engle. Les p-values pour les lag 3, 5 et 7 sont toutes supérieures à 5% donc on accepte $H_0$: homoscédasticité conditionnelle.
+
+- On regarde le test de stabilité dans le temps de Nyblom. La valeur de la statistique jointe est supérieure à 2.54 la valeur tabulée à 5% donc il y a au moins un coefficient qui n’est pas stable dans le temps. On peut voir que les statistiques de $\alpha_0$ ,$\alpha_1$, $\beta_1$ skew, shape sont supérieures à 0.47 la valeur tabulée des statistiques individuelles. On rejette donc $H_0$ pour ces coefficients et ils ne sont pas stables dans le temps. Cependant, pour remédier à cela, il faudrait réaliser un modèle à changement de régime, que nous ne traiterons pas. Nous allons donc continuer avec ce modèle.
+
+- On regarde l’effet de levier par le test d’Engle et Ng. La p-value de l’effet joint est supérieure à 5%. On accepte donc la 4ème hypothèse nulle : Il n’y a pas d’effet de levier (ni signe ni taille).
+
+- Le test de goodness-of-fit de Pearson nous donne 2 pvalues supérieures à 5%.
+
+**Ce modèle est correct mais n’est pas meilleur que le APARCH avec une distribution nig selon le critère de goodness-of-fit**
+
+
+## **GJR-GARCH** 
+
+<center> $$r_t = \mu +v_t  \qquad v_t=\sigma_t\varepsilon_t \\ \sigma_t^2 = \alpha_0 +\sum_{i=1}^m(\alpha_iv_{t-i}^2 + \gamma_i I_{t-i \lt0}v_{y-i}^2) + \sum_{j=1}^s \beta_j \sigma_{t-j}^2$$. </center>
+
+où $\varepsilon_t$ sont des bruits blancs et $I_{t-i} = 1$ si $v_{t-i \lt 0}$ et 0 sinon.  
+et :  
+$\alpha_0 \gt 0$  
+$\alpha_i \ge 0 \ \forall i \in \{1,\dots,m\}$  $  
+$\beta_j \ge 0 \ \forall j \in \{1,\dots,s\}$  
+
+Dans le cas d'un GJR-GARCH(1,1) :
+<center>$$ \sigma_t^2= \left\{{\alpha_0+(\alpha_1+\gamma)v_{t-1}^2 +\beta_1\sigma_{t-1}^2 \text{si} \varepsilon_{t-1}\le0\atop \alpha_0+\alpha_1v_{t-1}^2 +\beta_1\sigma_{t-1}^2 \text{ sinon}}\right. $$</center>
+
+### **Gaussienne inverse asymétrique**
+
+```{r gjr nig 4}
+
+spec2 = ugarchspec(variance.model=list(model="gjrGARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(1,1)),distribution.model="nig",fixed.pars=list(alpha1=0,gamma1=0,mu=0))
+fit2= ugarchfit(spec = spec2,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit2)
+
+```
+Tous les coefficients restants sont significatifs car leur p-value est inférieure à 5% mis à part shape.
+
+**Ce modèle est incorrect**
+
+#### **Courbe des impacts des nouvelles**
+
+Développée par Engle et Ng en 1991  : Ces courbes montrent la
+relation qui existe entre $\epsilon_{t-1}$ et la variance conditionnelle en supposant que toute l’information contenue à partir de t−2 et avant (t−3,etc) est constante. On voit que la courbe est constante, ce qui signifie que l'impact des nouvelles (bonnes ou mauvaises) sur la variance conditionnelle est insensible à la valeur de  $\epsilon_{t-1}$.
+L’impact des mauvaises nouvelles est à gauche (valeurs négatives de $\epsilon_{t-1}$ et celui des bonnes (quand elles sont positives) à droite.
+
+```{r gjr nig impact des nouvelles }
+
+nigjrgarch=newsimpact(z=NULL, fit2)
+plot(nigjrgarch$zx,nigjrgarch$zy, xlab=nigjrgarch$xexpr,ylab=nigjrgarch$yexpr ,type="l", main = "Courbe des impacts des nouvelles")
+
+```
+
+### **Hyperbolique généralisée skew t**
+
+```{r gjr ghst 4}
+
+spec2 = ugarchspec(variance.model=list(model="gjrGARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(1,1)),distribution.model="ghst",fixed.pars=list(alpha1=0, gamma1=0, mu=0))
+fit2= ugarchfit(spec = spec2,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit2)
+
+```
+
+La p-value du coefficient $\alpha_0$ est supérieure à 5%, cependant sa valeur vaut 0 alors qu'il doit être strictement positif.
+De plus, tous les coefficients sont significatifs sauf skew et shape dont la pvalue est supérieure à 5%.
+
+**Ce modèle est incorrect**
+
+#### **Courbe des impacts des nouvelles**
+
+On voit que la courbe est constante, ce qui signifie que l'impact des nouvelles (bonnes ou mauvaises) sur la variance conditionnelle est insensible à la valeur de  $\epsilon_{t-1}$.
+L’impact des mauvaises nouvelles est à gauche (valeurs négatives de $\epsilon_{t-1}$ et celui des bonnes (quand elles sont positives) à droite.
+
+```{r gjr ghst impact des nouvelles }
+
+nigjrgarch=newsimpact(z=NULL, fit2)
+plot(nigjrgarch$zx,nigjrgarch$zy, xlab=nigjrgarch$xexpr,ylab=nigjrgarch$yexpr ,type="l", main = "Courbe des impacts des nouvelles")
+
+```
+
+## **EGARCH** 
+
+<center>$$v_t = \sigma_t \varepsilon_t \\ 
+ln(\sigma_t^2) = \alpha_0 + \frac{1+\beta_1L+\dots+\beta_{s-1}L^{s-1}}{1-\alpha_1L-\dots-\alpha_mL^m}g(\varepsilon_{t-1}) \\
+g(\varepsilon_t) = \theta\varepsilon_t+\gamma (\vert \varepsilon_t \vert - E[\vert \varepsilon_t \vert])
+$$</center>
+avec : $\theta$ et $\gamma$, des constantes réelles et L, l'opérateur de retard.
+
+### **Gaussienne inverse asymétrique**
+
+
+```{r eg nig 2}
+
+spec3 = ugarchspec(variance.model=list(model="eGARCH", garchOrder=c(1,1)),
+mean.model=list(armaOrder=c(1,1)),distribution.model="nig",fixed.pars=list(mu=0))
+fit3 = ugarchfit(spec = spec3, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit3)
+
+```
+
+- Tous les coefficients restants sont significatifs car leur p-value est inférieure à 5%.
+
+- On regarde le test de Ljung-Box sur les résidus standardisés pour évaluer l’autocorrélation des aléas. Les p-values sont supérieures à 5%, donc on accepte $H_0$, donc l’autocorrélation est bien prise en compte. 
+
+- On regarde la présence d’effets ARCH (hétéroscédasticité conditionnelle) avec le test d’Engle. Les p-values pour les lag 3, 5 et 7 sont supérieures à 5% donc on accepte $H_0$: homoscédasticité conditionnelle.
+
+- On regarde le test de stabilité dans le temps de Nyblom. La valeur de la statistique jointe est supérieure à 2.11 la valeur tabulée à 5% donc il y a au moins un coefficient qui n’est pas stable dans le temps. On peut voir que les statistiques de $\beta_1$, $\alpha_0$, skew, shape sont supérieures à 0.47 la valeur tabulée des statistiques individuelles. On rejette donc $H_0$ pour ces coefficients et ils ne sont pas stables dans le temps. Cependant, pour remédier à cela, il faudrait réaliser un modèle à changement de régime, que nous ne traiterons pas. Nous allons donc continuer avec ce modèle.
+
+- On regarde l’effet de levier par le test d’Engle et Ng. La p-value de l’effet joint est supérieure à 5%. On accepte donc la 4ème hypothèse nulle : Il n’y a pas d’effet de levier (ni signe ni taille).
+
+- Le test de goodness-of-fit de Pearson nous donne les 4 p-values supérieures à 5%. 
+
+Son BIC vaut **-5.3934 > -5.3947**
+
+**Ce modèle est correct mais n’est pas meilleur que le APARCH avec une distribution nig selon le critère du BIC**
+
+#### **Courbe des impacts des nouvelles**
+
+Cette courbe montre une asymétrie dans la réaction de la variance conditionnelle : les mauvaises nouvelles ($\epsilon_{t-1}$<0) augmentent initialement la volatilité, mais cet effet diminue pour des chocs très négatifs. En revanche, les bonnes nouvelles ($\epsilon_{t-1}$>0) réduisent progressivement la volatilité, contribuant à stabiliser le système.
+L’impact des mauvaises nouvelles est à gauche (valeurs négatives de $\epsilon_{t-1}$ et celui des bonnes (quand elles sont positives) à droite.
+
+```{r eg nig impact des nouvelles }
+
+niegarch=newsimpact(z=NULL, fit3)
+plot(niegarch$zx,niegarch$zy, xlab=niegarch$xexpr,ylab=niegarch$yexpr ,type="l", main = "Courbe des impacts des nouvelles")
+
+```
+
+
+### **Hyperbolique généralisée skew t**
+
+
+```{r eg ghst 2}
+
+spec3 = ugarchspec(variance.model=list(model="eGARCH", garchOrder=c(1,1)),
+mean.model=list(armaOrder=c(1,1)),distribution.model="ghst", fixed.pars=list(mu=0))
+fit3 = ugarchfit(spec = spec3, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit3)
+
+```
+
+- Tous les coefficients restants sont significatifs car leur p-value est inférieure à 5%.
+
+- On regarde le test de Ljung-Box sur les résidus standardisés pour évaluer l’autocorrélation des aléas. Les p-values sont supérieures à 5%, donc on accepte $H_0$, donc l’autocorrélation est bien prise en compte. 
+
+- On regarde la présence d’effets ARCH (hétéroscédasticité conditionnelle) avec le test d’Engle. Les p-values pour les lag 3, 5 et 7 sont supérieures à 5% donc on accepte $H_0$: homoscédasticité conditionnelle.
+
+- On regarde le test de stabilité dans le temps de Nyblom. La valeur de la statistique jointe est supérieure à 2.11 la valeur tabulée à 5% donc il y a au moins un coefficient qui n’est pas stable dans le temps. On peut voir que les statistiques de $\beta_1$, $\alpha_0$, skew, shape sont supérieures à 0.47 la valeur tabulée des statistiques individuelles. On rejette donc $H_0$ pour ces coefficients et ils ne sont pas stables dans le temps. Cependant, pour remédier à cela, il faudrait réaliser un modèle à changement de régime, que nous ne traiterons pas. Nous allons donc continuer avec ce modèle.
+
+- On regarde l’effet de levier par le test d’Engle et Ng. La p-value de l’effet joint est supérieure à 5%. On accepte donc la 4ème hypothèse nulle : Il n’y a pas d’effet de levier (ni signe ni taille).
+
+- Le test de goodness-of-fit de Pearson nous donne 3 p-values supérieures à 5%.
+
+**Ce modèle est correct mais n’est pas meilleur que le APARCH avec une distribution nig selon le critère de goodness-of-fit**
+
+#### **Courbe des impacts des nouvelles**
+
+Cette courbe montre une asymétrie dans la réaction de la variance conditionnelle : les mauvaises nouvelles ($\epsilon_{t-1}$<0) augmentent initialement la volatilité, mais cet effet diminue pour des chocs très négatifs. En revanche, les bonnes nouvelles ($\epsilon_{t-1}$>0) réduisent progressivement la volatilité, contribuant à stabiliser le système.
+L’impact des mauvaises nouvelles est à gauche (valeurs négatives de $\epsilon_{t-1}$ et celui des bonnes (quand elles sont positives) à droite.
+
+```{r eg ghst impact des nouvelles }
+
+niegarch=newsimpact(z=NULL, fit3)
+plot(niegarch$zx,niegarch$zy, xlab=niegarch$xexpr,ylab=niegarch$yexpr ,type="l", main = "Courbe des impacts des nouvelles")
+
+```
+
+
+## **IGARCH** 
+
+Lorsque dans un modèle GARCH, on a $$\sum_{i=1}^{max\{m,s\}}(\alpha_i+\beta_i) \ge 1$$, alors le processus exibe une forte persistence et on obtient un modèle IGARCH.
+
+Pour un IGARCH(1,1) :
+<center>$$v_t=\sigma_t\varepsilon_t \\
+\sigma^2_t=\alpha_0+\beta_1\sigma_{t-1}^2+(1-\beta_1)v_{t-1}^2$$</center>
+
+avec :  
+$\{\varepsilon_t\}$ iid $N(0,1)$  
+$0 \lt \beta_1 \lt1$
+
+### **Gaussienne inverse asymétrique**
+
+On estime un modèle ARMA(1,1)-IGARCH(1,1) avec une distribution *nig*. Il n'est donc pas nécessaire de prendre en compte la saisonnalité car dans le projet 1 nous avons vu qu'il n'y en avait pas.
+
+```{r ig nig 1}
+
+spec4 = ugarchspec(variance.model=list(model="iGARCH", garchOrder=c(1,1)),
+mean.model=list(armaOrder=c(1,1)),distribution.model="nig")
+fit4 = ugarchfit(spec = spec4, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit4)
+
+```
+
+La p-value du coefficient $\alpha_0$ est supérieure à 0.05, cependant sa valeur est strictement positive donc il reste inchangé.
+
+- Tous les coefficients restants sont significatifs car leur p-value est inférieure à 5%.
+
+- On regarde le test de Ljung-Box sur les résidus standardisés pour évaluer l’autocorrélation des aléas. Les p-values sont supérieures à 5%, donc on accepte $H_0$ donc l’autocorrélation est bien prise en compte. 
+
+- On regarde la présence d’effets ARCH (hétéroscédasticité conditionnelle) avec le test d’Engle. Les p-values pour les lag 3, 5 et 7 sont supérieures à 5% donc on accepte $H_0$: homoscédasticité conditionnelle.
+
+- On regarde le test de stabilité dans le temps de Nyblom. La valeur de la statistique jointe est supérieure à 1.9 la valeur tabulée à 5% donc il y a au moins un coefficient qui n’est pas stable dans le temps. On peut voir que les statistiques de $\alpha_0$, skew, shape sont supérieures à 0.47 la valeur tabulée des statistiques individuelles. On rejette donc $H_0$ pour ces coefficients et ils ne sont pas stables dans le temps. Cependant, pour remédier à cela, il faudrait réaliser un modèle à changement de régime, que nous ne traiterons pas. Nous allons donc continuer avec ce modèle.
+
+- On regarde l’effet de levier par le test d’Engle et Ng. La p-value de l’effet joint est supérieure à 5%. On accepte donc la 4ème hypothèse nulle : Il n’y a pas d’effet de levier (ni signe ni taille).
+
+- Le test de goodness-of-fit de Pearson nous donne les 4 p-values supérieures à 5%.
+
+Son BIC vaut **-5.3733 > -5.3947**
+
+**Ce modèle est correct mais n’est pas meilleur que le APARCH avec une distribution nig selon le critère du BIC**
+
+### **Hyperbolique généralisée skew t**
+
+
+```{r ig ghst 4}
+
+spec4 = ugarchspec(variance.model=list(model="iGARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(1,1)),distribution.model="ghst", fixed.pars=list(mu=0,alpha1=0, ar1=0))
+fit4 = ugarchfit(spec = spec4, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit4)
+
+```
+
+La p-value du coefficient $\alpha_0$ est supérieure à 0.05 et sa valeur est nulle alors que par hypothèse il doit être strictement positif.
+
+**Ce modèle est incorrect**
+
+## **ARCH-M** 
+
+<center>$$r_t = \mu+c\sigma_t^2 + v_t \qquad v_t=\sigma_t \varepsilon_t \\
+\sigma_t^2 = \alpha_0+\alpha_1v_{t-1}^2+\beta_1\sigma_{t-1}^2
+$$</center>
+
+avec : $c$ (appelé paramètre de prime de risque) et $\mu$, des constantes. 
+
+### **Gaussienne inverse asymétrique**
+
+```{r arch nig 3}
+
+spec5 = ugarchspec(mean.model=list(armaOrder=c(1,1),archm=TRUE),distribution.model="nig",fixed.pars=list(mu=0, archm=0))
+fit5 = ugarchfit(spec = spec5,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit5)
+
+```
+
+- Tous les coefficients restants sont significatifs car leur p-value est inférieure à 5%.
+
+- On regarde le test de Ljung-Box sur les résidus standardisés pour évaluer l’autocorrélation des aléas. Les p-values sont supérieures à 5%. On accepte $H_0$, ainsi l'autocorrélation est bien prise en compte. 
+
+- On regarde la présence d’effets ARCH (hétéroscédasticité conditionnelle) avec le test d’Engle. Les p-values pour les lag 3, 5 et 7 sont toutes supérieures à 5% donc on accepte $H_0$: homoscédasticité conditionnelle.
+
+- On regarde le test de stabilité dans le temps de Nyblom. La valeur de la statistique jointe est supérieure à 1.9 la valeur tabulée à 5% donc il y a au moins un coefficient qui n’est pas stable dans le temps. On peut voir que les statistiques de $\alpha_0$, $\alpha_1$, $\beta_1$, skew, shape sont supérieures à 0.47 la valeur tabulée des statistiques individuelles. On rejette donc $H_0$ pour ces coefficients et ils ne sont pas stables dans le temps. Cependant, pour remédier à cela, il faudrait réaliser un modèle à changement de régime, que nous ne traiterons pas. Nous allons donc continuer avec ce modèle.
+
+- On regarde l’effet de levier par le test d’Engle et Ng. La p-value de l’effet joint est supérieure à 5%. On accepte donc la 4ème hypothèse nulle : Il n’y a pas d’effet de levier (ni signe ni taille).
+
+- Le test de goodness-of-fit de Pearson nous donne les 4 p-values supérieures à 5%.
+
+Son BIC vaut **-5.3722 > -5.3947**
+
+**Ce modèle est correct mais n’est pas meilleur que le APARCH avec une distribution nig selon le critère du BIC**
+
+
+### **Hyperbolique généralisée skew t**
+
+
+```{r arch ghst 4}
+
+spec5 = ugarchspec(mean.model=list(armaOrder=c(1,1),archm=TRUE),distribution.model="ghst",fixed.pars=list(mu=0, alpha1=0, archm=0))
+fit5 = ugarchfit(spec = spec5,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit5)
+
+
+```
+
+La p-value du coefficient $\alpha_0$ est supérieure à 0.05 et sa valeur est nulle, alors que par hypothèse ça doit êre strictement positif.
+
+De plus les coefficients sont tous significatifs sauf skew et shape.
+
+**Ce modèle est incorrect**
+
+## **GARCH** 
+
+Un modèle GARCH(m,s) est formulé comme cela :  
+<center>$$\sigma_t^2 = \alpha_0+\sum_{i=1}^m\alpha_iv_{t-i}^2+\sum_{j=1}^s\beta_j\sigma_{t-j}^2$$</center>
+avec :  
+$v_t = \sigma_t\varepsilon_t$  
+$\{\varepsilon_t\}$ iid $N(0,1)$ 
+$\alpha_0 \gt 0$  
+$\alpha_i \ge 0$  
+$\beta_j \ge 0$  
+$$\sum_{i=1}^{max\{m,s\}}(\alpha_i+\beta_i) \lt1$$
+On va s'intéresser à un modèle GARCH(1,1) :
+<center>$$\sigma_t^2 = \alpha_0+\alpha_1v_{t-1}^2+\beta_1\sigma_{t-1}^2$$</center>
+
+### **Gaussienne inverse asymétrique**
+
+```{r garch nig 3}
+
+spec6 = ugarchspec(distribution.model="nig",fixed.pars=list(alpha1=0, mu=0))
+fit6a = ugarchfit(spec = spec6, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit6a)
+
+```
+
+
+La p-value du coefficient $\alpha_0$ est supérieure à 0.05 et sa valeur est strictement positive , donc il reste inchangé.
+
+Tous les coefficients restants sont significatifs car leur p-value est inférieure à 5% sauf shape.
+
+
+**Ce modèle est incorrect**
+
+#### **Courbe des impacts des nouvelles**
+
+On voit que la courbe est constante, ce qui signifie que l'impact des nouvelles (bonnes ou mauvaises) sur la variance conditionnelle est insensible à la valeur de  $\epsilon_{t-1}$.
+L’impact des mauvaises nouvelles est à gauche (valeurs négatives de $\epsilon_{t-1}$ et celui des bonnes (quand elles sont positives) à droite.
+
+```{r garch nig impact des nouvelles }
+
+nigarch=newsimpact(z=NULL, fit6a)
+plot(nigarch$zx,nigarch$zy, xlab=nigarch$xexpr,ylab=nigarch$yexpr ,type="l", main = "Courbe des impacts des nouvelles")
+
+```
+
+#### **Prévisions conditionnelles et non conditionnelles**
+
+**Attention:** les abscisses sont incorrectes pour les 4 graphes. En effet elles vont de 2020 à 2024 (rtt) et non de 1977 à 1980.
+
+A gauche on a les prévisions non conditionnelles et à droite les prévisions conditionnelles avec en haut les prévisions pour le rendement et en bas celles de la volatilité. 
+
+```{r garch nig prev }
+
+# Faire des prévisions
+prev <- ugarchforecast(
+  fit6a,
+  n.ahead = length(rtt),
+  n.roll = length(rtt)
+)
+
+# Ajuster les marges pour éviter les erreurs de graphique
+par(mar = c(4, 4, 2, 1)) # Réduit les marges (bas, gauche, haut, droite)
+
+# Afficher le graphique
+plot(prev, which = "all")
+
+
+```
+
+### **Hyperbolique généralisée skew t**
+
+
+```{r garch ghst 3}
+
+spec6 = ugarchspec(distribution.model="ghst", fixed.pars=list(alpha1=0,mu=0))
+fit6b = ugarchfit(spec = spec6, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit6b)
+
+```
+
+La p-value du coefficient $\alpha_0$ est supérieure à 0.05 et sa valeur est nulle, alors que par hypothèse ça doit êre strictement positif.
+
+Toutes les pvalues sont inférieures à 5% sauf pour skew et shape.
+
+Donc skew et shape ne sont pas significatifs.
+
+**Ce modèle est incorrect**
+
+#### **Courbe des impacts des nouvelles**
+
+On voit que la courbe est constante, ce qui signifie que l'impact des nouvelles (bonnes ou mauvaises) sur la variance conditionnelle est insensible à la valeur de  $\epsilon_{t-1}$.
+L’impact des mauvaises nouvelles est à gauche (valeurs négatives de $\epsilon_{t-1}$ et celui des bonnes (quand elles sont positives) à droite.
+
+```{r garch ghst impact des nouvelles }
+
+nigarch=newsimpact(z=NULL, fit6b)
+plot(nigarch$zx,nigarch$zy, xlab=nigarch$xexpr,ylab=nigarch$yexpr ,type="l", main = "Courbe des impacts des nouvelles")
+
+```
+
+#### **Prévisions conditionnelles et non conditionnelles**
+
+**Attention**: les abscisses sont incorrectes pour les 4 graphes. En effet elles vont de 2020 à 2024 (rtt) et non de 1977 à 1980. 
+
+A gauche on a les prévisions non conditionnelles et à droite les prévisions conditionnelles avec en haut les prévisions pour le rendement et en bas celles de la volatilité. 
+
+```{r garch ghst prev }
+
+# Faire des prévisions
+prev <- ugarchforecast(
+  fit6b,
+  n.ahead = length(rtt),
+  n.roll = length(rtt)
+)
+
+# Ajuster les marges pour éviter les erreurs de graphique
+par(mar = c(4, 4, 2, 1)) # Réduit les marges (bas, gauche, haut, droite)
+
+# Afficher le graphique
+plot(prev, which = "all")
+
+```
+
+# **Modèle retenu**
+
+## **Tableau récapitulatif avec le test de Pearson**
+
+<html>
+<head>
+  <style>
+    table {
+      border-collapse: collapse;
+    }
+
+    table, th, td {
+      border: 1px solid black;
+    }
+
+    th, td {
+      padding: 10px;
+      text-align: center;
+    }
+
+    th {
+      background-color: #000080; /* Navy Blue */
+      color: white; /* White text for contrast */
+    }
+  </style>
+</head>
+<body>
+  <table>
+    <tr>
+      <th>Modèle estimé</th>
+      <th>Gaussienne inversée asymétrique (nig)</th>
+      <th>Hyperbolique généralisée skew t (ghst)</th>
+    </tr>
+    <tr>
+      <td>APARCH(1,1)</td>
+      <td>Modèle correct: 4 p-values &gt; 5%</td>
+      <td>Modèle correct: 2 p-values &gt; 5%</td>
+    </tr>
+    <tr>
+      <td>GJR GARCH(1,1)</td>
+      <td>Modèle incorrect</td>
+      <td>Modèle incorrect</td>
+    </tr>
+    <tr>
+      <td>EGARCH(1,1)</td>
+      <td>Modèle correct: 4 p-values &gt; 5%</td>
+      <td>Modèle correct: 3 p-values &gt; 5%</td>
+    </tr>
+    <tr>
+      <td>IGARCH(1,1)</td>
+      <td>Modèle correct: 4 p-values &gt; 5%</td>
+      <td>Modèle incorrect</td>
+    </tr>
+    <tr>
+      <td>ARCH-M(1,1)</td>
+      <td>Modèle correct: 4 p-values &gt; 5%</td>
+      <td>Modèle incorrect</td>
+    </tr>
+    <tr>
+      <td>GARCH(1,1)</td>
+      <td>Modèle incorrect</td>
+      <td>Modèle incorrect</td>
+    </tr>
+  </table>
+</body>
+</html>
+
+La meilleure distribution est la **nig** au vu des résultats des tests que l'on a obtenus.
+
+Selon le tableau ci-dessus, **Les modèles ayant le plus grand nombre de p-values > 5% dans le test de Pearson sont APARCH, EGARCH, IGARCH et ARCH-M pour la Gaussienne inverse asymétrique (nig)**
+
+
+Le modèle retenu est celui qui correspond à notre série et qui minimise le critère d'information de bayésien **BIC**, défini de la façon suivante :  
+<center>$SBIC = log (\hat\sigma_T^2(k)) + \frac{log(T)}{T}k$</center>
+avec $k$, nombre de paramètres.
+
+- Le BIC du modèle APARCH avec un distribution nig est de -5.3947
+
+- Le BIC du modèle EGARCH avec un distribution nig est de -5.3934
+
+- Le BIC du modèle IGARCH avec un distribution nig est de -5.3733
+
+- Le BIC du modèle ARCH-M avec un distribution nig est de -5.3722
+
+Or -5.3947 < -5.3934 < -5.3733 < -5.2722 
+
+**Le meilleur modèle pour notre série est un ARMA(0,5)-APARCH(1,1) avec un distribution nig et delta=1, ma3=0, mu=0,  ma1=0** car il correspond au BIC le plus petit.
+
+Ce modèle est en adéquation avec les résultats du projet puisqu'il permet de modéliser l'asymétrie, les queues de distribution épaisses de nos données, il prend bien en compte l'autocorrélation des aléas, les clusters de volatilité ainsi que l'effet de levier.
+
+
+```{r best spécification}
+
+specbest = ugarchspec(variance.model=list(model="apARCH", garchOrder=c(1,1)),
+mean.model=list(armaOrder=c(0,5)),distribution.model="nig",fixed.pars=list(delta=1, ma3=0, mu=0,  ma1=0))
+fitbest = ugarchfit(spec = spec1,data = rt,out.sample=length(rtt),solver="hybrid")
+
+```
+  
+# **Value at Risk**
+
+**La Value-at-Risk est définie comme la perte maximale potentielle qui ne devrait être atteinte qu'avec une probabilité donnée sur un horizon temporel donné (Manganelli et Engle, 2001).**
+
+**Nous nous intéresserons à la Value at Risk à 95%**
+
+
+## **Les tests et les hypothèses des Values-at-Risk** 
+
+On définit la violation (le dépassement ou exception) comme une situation dans laquelle on observe ex-post une perte plus importante en valeur absolue que la VaR prévue ex-ante. Formellement, il y a violation si et seulement si:  
+
+<center>$$r_t \le VaR_{t+1 \vert t}(q)$$</center>
+
+Dans la pratique, on définit souvent une variable dichotomique associée à l’occurrence d’une violation appelée elle aussi violation ou fonction Hit (Campbell, 2006 ; Engle et Manganelli, 2004) :
+
+<center>$$I_t(q)=\left\{{1 \text{ si } r_t \le VaR_{t+1 \vert t}(q) \atop 0  \text{ sinon}}\right.$$</center>
+
+<html>
+<head>
+  <style>
+    table {
+      border-collapse: collapse;
+    }
+
+    table, th, td {
+      border: 1px solid black;
+    }
+
+    th, td {
+      padding: 10px;
+      text-align: center;
+    }
+
+    th {
+      background-color: #ccc;
+    }
+
+    td {
+      background-color: #001f3f;
+      color: white;
+    }
+  </style>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.7/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+  <script>
+    MathJax.Hub.Config({
+      tex2jax: {
+        inlineMath: [['$', '$'], ['\\(', '\\)']],
+        displayMath: [['$$', '$$'], ['\\[', '\\]']],
+        processEscapes: true
+      }
+    });
+  </script>
+</head>
+<body>
+
+<table>
+  <tr>
+    <th>Test</th>
+    <th>Statistique</th>
+    <th>Hypothèse</th>
+    <th>Distribution sous $H_0$</th>
+    <th>Règle de décision</th>
+  </tr>
+  
+  <tr>
+    <th>LR (Likelihood Ratio) de Kupiec</th>
+    <td>
+      $$LR = -2\log\left(\frac{q^N(1-q)^{T-N}}{\hat f^N(1-\hat f)^{T-N}}\right)$$ <br>
+      avec : $\hat f$, le taux de violation empirique <br>
+      $N$: le nombre de violations de la VaR <br>
+      $T$: le nombre initial d'observations <br>
+      $q$: le taux de violation théorique
+    </td>
+    <td>
+      $H_0$ : $f=q$ : le taux (ou le nombre) de violation observé est égal au taux (ou nombre) de violation théorique <br>
+      $H_a$ : $f \neq q$ : le taux (ou le nombre) de violation observé est différent du taux (ou nombre) de violation théorique
+    </td>
+    <td>$LR \sim \chi^2(1)$</td>
+    <td>On accepte si la p-value est supérieure à 5%</td>
+  </tr>
+  
+  <tr>
+    <th>LR (Likelihood Ratio) de Christoffersen</th>
+    <td>$$LR_{Christ}$$</td>
+    <td>
+      $H_0$ : $f=q$ : le taux (ou le nombre) de violation observé est égal au taux (ou nombre) de violation théorique et les violations sont indépendantes<br>
+      $H_a$ : $f \neq q$ : le taux (ou le nombre) de violation observé est différent du taux (ou nombre) de violation théorique et/ou les violations ne sont pas indépendantes
+    </td>
+    <td>$LR_{Christ}\sim \chi^2(2)$</td>
+    <td>On accepte si la p-value est supérieure à 5%</td>
+  </tr>
+</table>
+
+</body>
+</html>
+
+      
+Le test de Christoffersen pose la condition supplémentaire que les violations sont indépendantes entre elles.
+De ce fait ce test est plus efficace et utile que le test de Kupiec.
+Ainsi c'est à partir ce test que nous allons faire nos conclusions sur nos Values-at-Risk.
+
+
+## **VaR Paramétrique**
+
+Formellement, la prévision $VaR_{t+1|t}(q)$ s'écrit :
+      
+      $$VaR_{t+1|t}(q) = -F_{r_{t+1}}^{-1}(q|\Omega_t) $$
+      
+      où $F_{r_{t+1}}^{-1}(q|\Omega_t)$ désigne la fonction quantile associée à la fonction de distribution des rendements en t+1, conditionnelle à l'ensemble d'information disponible en t.
+    
+    On considère l'exemple d'un modèle GARCH(1,1) sous l'hypothèse de la distribution de Student. On suppose ainsi que les rendements d'un actif $r_t$ satisfont le modèle suivant :
+      
+      <center>
+      $$
+      \left\{
+        \begin{array}{l}
+        r_t = \mu_t + v_t \\
+        v_t = \sigma_t \epsilon_t \\
+        \sigma_t^2 = \alpha_0 + \alpha_1 v_{t-1}^2 + \beta_1 \sigma_{t-1}^2 \\
+        \epsilon_t \sim iid~student(\nu)
+        \end{array}
+        \right.
+        $$
+          </center>
+          
+          avec les contraintes suivantes sur les paramètres suivants : $\alpha_0 \geq 0, \alpha_1 \geq 0, \beta_1 \geq 0, \nu \geq 2.$  
+          Soient $\hat\alpha_0, \hat\alpha_1, \hat\beta_1, \hat\nu, \hat\mu$ des estimateurs convergents (MV) des paramètres et soit $\sigma_1^2$ une condition initiale sur le processus de variance conditionnelle $\sigma_t^2$.
+        
+        À partir de ces différents éléments, il est possible de prévoir la variance conditionnelle des rendements pour la date T + 1 de la façon suivante :
+          
+          <center> $$ \hat \sigma_{T+1}^2=\hat \alpha_0+\hat\alpha_1v_T^2+\hat\beta_1\sigma_T^2 $$ </center>
+          
+          On note $VaR_{T+1|T}(q)$ la prévision de la VaR de niveau q anticipée pour la date T+1 conditionnellement à l'information disponible en T. Par définition de la VaR, on a :
+
+$$
+Pr\left( r_{T+1} \leq VaR_{T+1|T}(q) \mid \Omega_T \right) = 1 - q 
+\Leftrightarrow 
+Pr\left( \epsilon_{T+1} \leq \frac{VaR_{T+1|T}(q) \mid \Omega_T - \mu}{\sigma_{T+1}} \right) = 1 - q
+$$
+
+Sachant que l'on suppose que la distribution conditionnelle des rendements est une distribution de Student à $\nu$ degrés de liberté, de variance égale à $\frac{\nu}{(\nu-2)\nu}$, on peut en déduire une prévision du fractile de la distribution conditionnelle valable pour la date T + 1, c'est-à-dire la VaR. Soit $G(x, \nu)$, la fonction de répartition de la loi de Student à $\nu$ degrés de liberté. La prévision de le VaR est définie par la quantité suivante :
+
+<center> $$ VaR_{T+1|t}(q)=\hat \mu-G^{-1}(q,\hat \nu)\hat\sigma_{T+1} $$ </center>
+
+avec $\hat \nu$ la valeur estimée du paramètre $\nu$.
+
+```{r VAR roll, warning=FALSE}
+
+no_cores <- detectCores() - 1
+cl <- makeCluster(no_cores)
+
+roll = ugarchroll(specbest, data=rt,n.ahead=1, forecast.length=length(rtt),
+  refit.every=1, refit.window="moving", solver = "hybrid",
+  cluster=cl,fit.control = list(), calculate.VaR=TRUE,
+  VaR.alpha=0.05,keep.coef = TRUE)
+
+stopCluster(cl)
+
+```
+
+### **Estimation de la VaR paramétrique**
+
+```{r moyenne VaR param}
+
+VaR95 <- as.numeric(quantile(fitbest, probs = 0.05))
+
+# Calcul de la moyenne
+mean_VaR <- mean(VaR95)
+mean_VaR
+
+```
+
+```{r représentation VaR param}
+
+plot(VaR95, type='l',col=1)
+
+```
+
+### **Estimation par fenêtre glissante**
+
+
+```{r plot1 param}
+
+valueatrisk<-zoo(roll@forecast$VaR[,1])
+reelles<-zoo(roll@forecast$VaR[,2])#=rtt
+index<-rownames(roll@forecast$VaR)
+plot(dates[2556:N],reelles,type='b',xlab="Dates",ylab="Rendements et VaR")
+lines(dates[2556:N],valueatrisk,type='l',col="red")
+legend("bottomright",inset=.05,c("rt","VaR"),col=1:2,lty=c(1,1))
+
+```
+
+
+On peut voir que la VaR suit les rendements les plus négatifs.  
+En moyenne la VaR paramétrique est de `r abs(mean(valueatrisk))*100`% sur la période étudiée (rtt).
+
+### **Estimation de tous les paramètres du modèle APARCH**
+
+```{r plot2 param}
+
+fit = ugarchfit(specbest, data = rte)
+spec2 = specbest
+setfixed(spec2)<-as.list(coef(fit))
+filt = ugarchfilter(spec=spec2, data=rtt)
+VaR=fitted(filt)+sigma(filt)*qdist("nig",p=0.05,mu=0,sigma=1, skew = coef(filt)["skew"],shape=coef(filt)["shape"])
+matplot(dates[2556:N],cbind(VaR,rtt),type="l",col=c("red","blue"),xlab="Dates",ylab="Rendements et VaR")
+legend("bottomright",inset=.05,c("VaR","rt"),col=c("red","blue"),lty=c(1,1),x.intersp=0.5,y.intersp=0.5,cex=0.75)
+
+```
+
+
+```{r Backtest VAR Param}
+
+report(roll,type="VaR",VaR.alpha=0.05,conf.level=0.95)
+
+```
+
+- On obtient un nombre de violations de 62 (taux de 5%) pour une valeur attendue de 62.5 (taux de 5%).
+- La p-value du test de Kupiec est 0.948 > 5% donc on accepte l'hypothèse nulle : $f=q$.
+        - La p-value du test de Christoffersen est 0.275 > 5% donc on accepte l'hypothèse nulle : $f=q$ et les violations sont indépendantes les unes des autres.  
+
+On en conclut que la VaR Paramétrique a bien été estimée.
+
+Voici ci-dessous le tableau pour les VaR.
+
+```{r Backtest VAR}
+
+alpha=0.95 #VaR à 95%
+
+backTestVaR <- function(x, p = alpha) {
+  normal.VaR = as.numeric(VaR(x, p=p, method="gaussian"))
+  historical.VaR = as.numeric(VaR(x, p=p, method="historical"))
+  modified.VaR = as.numeric(VaR(x, p=p, method="modified"))
+  ans = c(normal.VaR, historical.VaR, modified.VaR)
+  names(ans) = c("Normal", "HS", "Modified")
+  return(ans)
+}
+
+# rolling 1-step ahead estimates of VaR
+VaR.results = rollapply(as.zoo(rt), width=T, 
+                        FUN = backTestVaR, p=alpha, by.column = FALSE,
+                        align = "right")
+
+violations.mat = matrix(0, 3, 5)
+rownames(violations.mat) = c("Normal", "HS", "Modified")
+colnames(violations.mat) = c("En1", "n1", "1-alpha", "Percent", "VR")
+violations.mat[, "En1"] = (1-alpha)*Q
+violations.mat[, "1-alpha"] = 1 - alpha
+
+# Show Normal VaR violations
+normalVaR.violations = as.numeric(as.zoo(rt[index(VaR.results)])) < VaR.results[, "Normal"]
+violation.dates = index(normalVaR.violations[which(normalVaR.violations)])
+
+
+for(i in colnames(VaR.results)) {
+  VaR.violations = as.numeric(as.zoo(rt[index(VaR.results)])) < VaR.results[, i]
+  violations.mat[i, "n1"] = sum(VaR.violations)
+  violations.mat[i, "Percent"] = sum(VaR.violations)/T
+  violations.mat[i, "VR"] = violations.mat[i, "n1"]/violations.mat[i, "En1"]
+}
+
+
+resultats<-data.frame(matrix(NA,ncol=4,nrow=3))
+colnames(resultats)<-c("expected.exceed","actual.exceed","Kupiecpv","Christoffersenpv")
+rownames(resultats)<-c("Normale","HS","CF")
+
+# normale
+VaR.test1 = VaRTest(1-alpha,actual=coredata(rt[index(VaR.results)]), VaR=coredata(VaR.results[,"Normal"]))
+resultats[1,1]=VaR.test1$expected.exceed
+resultats[1,2]=VaR.test1$actual.exceed
+resultats[1,3]=VaR.test1$uc.LRp
+resultats[1,4]=VaR.test1$cc.LRp
+
+# historique
+VaR.test2 = VaRTest(1-alpha,actual=coredata(rt[index(VaR.results)]), VaR=coredata(VaR.results[,"HS"]))
+resultats[2,1]=VaR.test2$expected.exceed
+resultats[2,2]=VaR.test2$actual.exceed
+resultats[2,3]=VaR.test2$uc.LRp
+resultats[2,4]=VaR.test2$cc.LRp
+
+
+
+# modifie
+VaR.test3 = VaRTest(1-alpha, actual=coredata(rt[index(VaR.results)]), VaR=coredata(VaR.results[,"Modified"]))
+
+resultats[3,1]=VaR.test3$expected.exceed
+resultats[3,2]=VaR.test3$actual.exceed
+resultats[3,3]=VaR.test3$uc.LRp
+resultats[3,4]=VaR.test3$cc.LRp
+
+resultats
+```
+
+
+## **VaR Normale**
+
+Lorsque $\Delta p_t \sim N(E[\Delta p_t],\sigma(\Delta p_t)$ :  
+<center> $$Pr[\frac{\Delta p_t-E[\Delta p_t]}{\sigma(\Delta p_t)} \le \frac{VaR_q-E[\Delta p_t]}{\sigma(\Delta p_t)}] = 1-q $$ </center>
+
+avec $E[\Delta p_t]$, l'espérance des variations des prix, $\sigma(\Delta p_t)$, a volatilité (c'est-à-dire l'écart-type) de la variation des prix et $\frac{VaR_q-E[\Delta p_t]}{\sigma(\Delta p_t)}$, le quantile de la distribution normale centrée réduite $\Phi^{-1}(1-q)$.
+
+Comme $\Phi^{-1}(1-q) = -\Phi^{-1}(q)$ et comme l'espérance de la variation des
+valeurs de cours est nulle :  
+<center> $VaR_q = -\Phi^{-1}(q)\sigma(\Delta p_t)$ </center>
+
+
+```{r VAR Normale}
+
+VaR(rte, p=0.95, method="gaussian")
+
+```
+La perte potentielle maximale atteinte avec 95% de chance est de 2.911399%, selon la méthode normale. C'est-à-dire que la perte potentielle ne dépassera cette valeur que 5% du temps.
+
+Selon le tableau des VaR on a:
+  
+- On obtient un nombre de violations de 66 pour une valeur attendue de 62.
+- La p-value du test de Kupiec est 0.6572287 > 5% donc on accepte l'hypothèse nulle : $f= q$.
+- La p-value du test de Christoffersen est 0.07030575 > 5% donc on accepte l'hypothèse nulle : $f = q$ et les violations sont indépendantes les unes des autres. 
+
+On en conclut que la VaR Normale a bien été estimée.
+
+
+## **VaR Cornish-Fisher**
+
+On modifie l'équation de la VaR normale pour tenir compte de l'asymétrie et des queues de distribution épaisses :  
+  <center> $MVaR_q = E[\Delta p_t] + z_{cf}(q) \sigma(\Delta p_t)$ </center>
+  
+  avec :  
+  <center> $$ z_{cf} = z_c+\frac{(z_c^2-1)s}{6}+\frac{(z_c^3-3z_c)k}{24}+\frac{2z_c^3-5z_cs^2}{36}$$ </center>
+  
+  où $z_c = -\Phi^{-1}(q)$, s est le skewness et k est l'excès de kurtosis.
+
+```{r VAR CF}
+VaR(rte, p=0.95, method="modified")
+```
+La perte potentielle maximale atteinte avec 95% de chance est de 2.844005%, selon la méthode de Cornish-Fisher. C'est-à-dire que la perte potentielle ne dépassera cette valeur que 5% du temps.
+
+Selon le tableau des VaR on a:
+  
+  - On obtient un nombre de violations de 67 pour une valeur attendue de 62.
+- La p-value du test de Kupiec est 0.5680130 > 5% donc on accepte l'hypothèse nulle : $f = q$.
+- La p-value du test de Christoffersen est 0.07719156 > 5% donc on accepte l'hypothèse nulle : $f = q$ et les violations sont indépendantes les unes des autres. 
+
+On en conclut que la VaR de Cornish-Fisher a bien été estimée. 
+
+## **VaR Historique**
+
+La VaR historique est une estimation non paramétrique de la VaR qui consiste à utiliser la distribution observée des historiques pour estimer la distribution des facteurs de risque.
+
+La valeur dont on désire déterminer la VaR est le facteur de risque lui-même comme pour le cours d'une action. On note $X(0)$ la valeur observée aujourd'hui du risque et $X(1)$ la valeur future. On suppose que la distribution de la variable aléatoire $\Delta = \frac{X(1)-X(0)}{X(0)}$ est représentée par les observations $$\Delta(t)=\frac{X(t)-X(t-1)}{X(t-1)}, ~t=-T+1,...,-1,0$$
+  
+  La relation $X(1)-X(0)=\Delta * X(0)$ permet d'obtenir la valeur future du risque X par $X^{(t)}(1)=X(0)+\Delta(t)*X(0), ~t=-T+1,...,-1,0$ et donc la distribution de la variation future de valeur par : $\Delta p^{(t)}=X^{(t)}(1)-X(0)=\Delta(t)*X(0), ~t=-T+1,...,-1,0$.
+
+Ensuite, on range les variations de valeur futures par ordre croissant et la VaR est égale au quantile de la distribution des variations futures.
+
+
+```{r VAR Historique}
+VaR(rte, p=0.95, method="historical")
+```
+La perte potentielle maximale atteinte avec 95% de chance est de 2.961336%, selon la méthode historique. C'est-à-dire que la perte potentielle ne dépassera cette valeur que 5% du temps.
+
+Selon le tableau des VaR on a:
+  
+- On obtient un nombre de violations de 65 pour une valeur attendue de 62.
+- La p-value du test de Kupiec est 0.7520836 > 5% donc on accepte l'hypothèse nulle : $f = q$.
+- La p-value du test de Christoffersen est 0.06263415 > 5% donc on accepte l'hypothèse nulle : $f =q$ et les violations sont indépendantes les unes des autres. 
+
+On en conclut que la VaR Historique a bien été estimée. 
+
+# **Backtesting** 
+
+Cela consiste à comparer, au quotidien, la VaR estimée avec les pertes réalisées. En principe, si nous testons une VaR à 99%, on
+doit s’attendre à ce que les rendements quotidiens du portefeuille d´epassent la VaR une fois sur 100. Les autorités de Bâle exigent
+un backtest sur 250 jours d’historique, au minimum ce qui donnerait un nombre de dépassements autorisés de 2.5. Si le nombre de
+dépassement est significativement plus élevé , la VaR et donc les risques sont sous-évalués. Si par contre, le nombre d’exceptions
+est significativement plus faible alors la VaR est sur-estimée et la banque est trop conservatrice.
+
+**Remarque :** le comité de Bâle exige une VaR sur 10 ou 20 jours. Or avec une VaR à 10 jours et une confiance à 99% on doit s'attendre à une exception tous les 100*10 = 1000 jours, soit environ 4 ans. Il n’est donc pas possible de backtester la VaR à 10 jours et on se ramènera à une VaR quotidienne.
+
+Pour savoir si les VaR sont bien estimées ou non, on utilise les tests de Kupiec et Christoffersen. 
+Il est important de noter qu'on tirera nos conclusions à partir des résultats du test Christoffersen.
+Si on a une pvalue supérieure à 5%, la VaR est bien estimée, sinon on a 2 cas:
+  
+  - le nombre de violations estimées est supérieur au nombre de violations théoriques:  **VaR sous-estimée**.
+- le nombre de violations estimées est inférieur au nombre de violations théoriques:  **VaR sur-estimée**.
+
+<html>
+  <head>
+  <style>
+  table {
+    border-collapse: collapse;
+  }
+
+table, th, td {
+  border: 1px solid black;
+}
+
+th, td {
+  padding: 10px;
+  text-align: center;
+}
+
+th {
+  background-color: #000080; /* Navy Blue */
+    color: white; /* White text for contrast */
+}
+</style>
+  </head>
+  <body>
+  
+  <table>
+  <tr>
+  <th>Méthode d'estimation de la VaR</th>
+    <th>Var estimée</th>
+    <th>Nombre de violations théorique</th>
+    <th>Nombre de violations empirique</th>
+    <th>P-value du test de Kupiec</th>
+    <th>P-value du test de Christoffersen</th>
+  </tr>
+  
+  <tr>
+    <th>VaR Paramétrique</th>
+    <td></td>
+    <td>62,5</td>
+    <td>62</td>
+    <td>0.948</td>
+    <td>0.275</td>
+  </tr>
+  
+  <tr>
+    <th>VaR Normale</th>
+    <td>2.911399% </td>
+    <td>62</td>
+    <td>66</td>
+    <td>0.6572287</td>
+    <td>0.07030575</td>
+  </tr>
+  
+  <tr>
+    <th>VaR de Cornish-Fisher</th>
+    <td>2.844005%</td>
+    <td>62</td>
+    <td>67</td>
+    <td>0.5680130</td>
+    <td>0.07719156</td>
+  </tr>
+  
+  <tr>
+    <th>VaR Historique</th>
+    <td>2.961336%</td>
+    <td>62</td>
+    <td>65</td>
+    <td>0.7520836</td>
+    <td>0.06263415</td>
+    
+</table>
+</body>
+</html>
+
+En moyenne la VaR paramétrique est de `r abs(mean(valueatrisk))*100`% sur la période étudiée (ensemble de test).
+
+**Selon le test de Christoffersen, toutes les VaR sont bien estimées (Règle de décision de la pvalue: VaR bien estimée si la pvalue est supérieure 5%).**  
+  
+  
+# **Annexe: Modèle ARMA-GARCH**
+
+## **APARCH** 
+
+### **Gaussienne inverse asymétrique**
+
+On estime un modèle ARMA(1,1)-APARCH(1,1) avec une distribution *nig*. Il n'est donc pas nécessaire de prendre en compte la saisonnalité car dans le projet 1 nous avons vu qu'il n'y en avait pas.
+Rappelons que dans R, $\alpha_0$ est nommé $\omega$.
+
+```{r ap nig 1}
+
+spec1 = ugarchspec(variance.model=list(model="apARCH", garchOrder=c(1,1)),
+mean.model=list(armaOrder=c(1,1)),distribution.model="nig")
+fit1= ugarchfit(spec = spec1,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit1)
+
+```
+
+On regarde, dans un premier temps, la valeur de $\delta$. Elle est proche de 1, donc on va donc la fixer à 1.
+
+```{r ap nig 2}
+
+spec1 = ugarchspec(variance.model=list(model="apARCH", garchOrder=c(1,1)),
+mean.model=list(armaOrder=c(1,1)),distribution.model="nig",fixed.pars=list(delta=1))
+fit1= ugarchfit(spec = spec1,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit1)
+
+```
+
+La p-value du coefficient $\mu$ du modèle ARMA est la pvalue la plus élevée (sans considérer $\alpha_0$, skew et shape) et elle est supérieure à 5%. On rejette $H_0$ du test de significativité des coefficients et fixe la valeur de $\mu$ à 0.
+
+```{r ap nig 3}
+
+spec1 = ugarchspec(variance.model=list(model="apARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(1,1)),distribution.model="nig",fixed.pars=list(delta=1,mu=0))
+fit1= ugarchfit(spec = spec1,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit1)
+
+```
+
+Tous les coefficients restants sont significatifs car leur p-value est inférieure à 5%.
+
+On regarde le test de Ljung-Box sur les résidus standardisés pour évaluer l’autocorrélation des aléas. Les p-values sont inférieures 5% donc on rejette 𝐻0 et l’autocorrélation n’est pas bien prise en compte.
+
+On passe donc à un modèle ARMA(0,5)-APARCH(1,1) avec un distribution nig.
+
+```{r ap nig 4}
+
+spec1 = ugarchspec(variance.model=list(model="apARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(0,5)),distribution.model="nig")
+fit1= ugarchfit(spec = spec1,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit1)
+
+
+```
+
+On fixe désormais delta à 1 car sa valeur est proche de 1.
+```{r ap nig 5}
+spec1 = ugarchspec(variance.model=list(model="apARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(0,5)),distribution.model="nig",fixed.pars=list(delta=1))
+fit1= ugarchfit(spec = spec1,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit1)
+
+
+
+```
+
+On fixe désormais ma3 à 0 car la pvalue la plus élevée (sans considérer $\alpha_0$, skew et shape)
+
+```{r ap nig 6}
+
+spec1 = ugarchspec(variance.model=list(model="apARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(0,5)),distribution.model="nig",fixed.pars=list(delta=1, ma3=0))
+fit1= ugarchfit(spec = spec1,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit1)
+
+```
+
+On fixe désormais mu car la pvalue est la plus élevée (sans considérer $\alpha_0$, skew et shape)
+```{r ap nig 7}
+
+spec1 = ugarchspec(variance.model=list(model="apARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(0,5)),distribution.model="nig",fixed.pars=list(delta=1, ma3=0, mu=0))
+fit1= ugarchfit(spec = spec1,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit1)
+
+```
+
+On fixe désormais ma1 à 0 car la pvalue est la plus élevée (sans considérer $\alpha_0$, skew et shape)
+
+
+### **Hyperbolique généralisée skew t**
+
+On estime un modèle ARMA(1,1)-APARCH(1,1) avec une distribution *ghst*. Il n'est donc pas nécessaire de prendre en compte la saisonnalité car dans le projet 1 nous avons vu qu'il n'y en avait pas.
+
+```{r ap ghst 1}
+
+spec1 = ugarchspec(variance.model=list(model="apARCH", garchOrder=c(1,1)),
+mean.model=list(armaOrder=c(1,1)),distribution.model="ghst")
+fit1= ugarchfit(spec = spec1,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit1)
+
+```
+
+On regarde, dans un premier temps, la valeur de $\delta$. Elle est proche de 1, on va donc la fixer à 1.
+
+```{r ap ghst 2}
+
+spec1 = ugarchspec(variance.model=list(model="apARCH", garchOrder=c(1,1)),
+mean.model=list(armaOrder=c(1,1)),distribution.model="ghst", fixed.pars=list(delta=1))
+fit1= ugarchfit(spec = spec1,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit1)
+
+```
+
+La p-value du coefficient $\mu$ du modèle ARMA est la pvalue la plus élevée (sans considérer $\alpha_0$, skew et shape) et elle est supérieure à 5%. On rejette $H_0$ du test de significativité des coefficients et fixe la valeur de $\mu$ à 0.
+
+```{r ap ghst 3}
+
+spec1 = ugarchspec(variance.model=list(model="apARCH", garchOrder=c(1,1)),
+mean.model=list(armaOrder=c(1,1)),distribution.model="ghst", fixed.pars=list(delta=1, mu=0))
+fit1= ugarchfit(spec = spec1,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit1)
+```
+
+Tous les coefficients restants sont significatifs car leur p-value est inférieure à 5%.
+
+On regarde le test de Ljung-Box sur les résidus standardisés pour évaluer l’autocorrélation des aléas. Les p-values sont inférieures 5% donc on rejette 𝐻0 et l’autocorrélation n’est pas bien prise en compte.
+
+On passe donc à un modèle ARMA(0,5)-APARCH(1,1) avec un distribution nig.
+
+```{r ap ghst 4}
+
+spec1 = ugarchspec(variance.model=list(model="apARCH", garchOrder=c(1,1)),
+mean.model=list(armaOrder=c(0,5)),distribution.model="ghst")
+fit1= ugarchfit(spec = spec1,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit1)
+```
+
+On regarde, dans un premier temps, la valeur de $\delta$. Elle est proche de 1, on va donc la fixer à 1.
+
+```{r ap ghst 5}
+
+spec1 = ugarchspec(variance.model=list(model="apARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(0,5)),distribution.model="ghst", fixed.pars=list(delta=1))
+fit1= ugarchfit(spec = spec1,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit1)
+
+```
+
+On fixe désormais ma3 à 0 car la pvalue est la plus élevée (sans considérer $\alpha_0$, skew et shape).
+```{r ap ghst 6}
+
+spec1 = ugarchspec(variance.model=list(model="apARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(0,5)),distribution.model="ghst", fixed.pars=list(delta=1, ma3=0))
+fit1= ugarchfit(spec = spec1,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit1)
+```
+
+On fixe désormais ma1 à 0 car la pvalue est la plus élevée (sans considérer $\alpha_0$, skew et shape).
+
+## **GJR-GARCH** 
+
+### **Gaussienne inverse asymétrique**
+
+On estime un modèle ARMA(1,1)-GJR GARCH(1,1) avec une distribution *nig*. Il n'est donc pas nécessaire de prendre en compte la saisonnalité car dans le projet 1 nous avons vu qu'il n'y en avait pas.
+
+```{r gjr nig 1}
+
+spec2 = ugarchspec(variance.model=list(model="gjrGARCH", garchOrder=c(1,1)),
+mean.model=list(armaOrder=c(1,1)),distribution.model="nig")
+fit2= ugarchfit(spec = spec2,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit2)
+
+```
+
+La p-value du coefficient $\alpha_0$ est supérieure à 5%, cependant sa valeur (0.000003) est strictement positive donc il reste inchangé.
+
+La p-value du coefficient $\alpha_1$ est la pvalue la plus élevée (sans considérer $\alpha_0$, skew et shape) et elle est supérieure à 5%. On rejette $H_0$  du test de significativité des coefficients et fixe la valeur de $\alpha_1$ à 0.
+
+```{r gjr nig 2}
+
+spec2 = ugarchspec(variance.model=list(model="gjrGARCH", garchOrder=c(1,1)),
+mean.model=list(armaOrder=c(1,1)),distribution.model="nig",fixed.pars=list(alpha1=0))
+fit2= ugarchfit(spec = spec2,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit2)
+
+```
+
+La p-value du coefficient $\gamma_1$  du modèle ARMA est la pvalue la plus élevée (sans considérer $\alpha_0$, skew et shape) et elle est supérieure à 5%. On rejette $H_0$  du test de significativité des coefficients et fixe la valeur de $\gamma_1$ à 0.
+
+```{r gjr nig 3}
+
+spec2 = ugarchspec(variance.model=list(model="gjrGARCH", garchOrder=c(1,1)),
+mean.model=list(armaOrder=c(1,1)),distribution.model="nig",fixed.pars=list(alpha1=0,gamma1=0))
+fit2= ugarchfit(spec = spec2,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit2)
+
+```
+
+La p-value du coefficient $\mu$ est la pvalue la plus élevée (sans considérer $\alpha_0$, skew et shape) et elle est supérieure à 5%. On rejette $H_0$  du test de significativité des coefficients et fixe la valeur de $\mu$ à 0.
+
+
+
+### **Hyperbolique généralisée skew t**
+
+On estime un modèle ARMA(1,1)-GJR GARCH(1,1) avec une distribution *ghst*. Il n'est donc pas nécessaire de prendre en compte la saisonnalité car dans le projet 1 nous avons vu qu'il n'y en avait pas.
+
+```{r gjr ghst 1}
+
+spec2 = ugarchspec(variance.model=list(model="gjrGARCH", garchOrder=c(1,1)),
+mean.model=list(armaOrder=c(1,1)),distribution.model="ghst")
+fit2= ugarchfit(spec = spec2,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit2)
+
+```
+
+La p-value du coefficient $\alpha_0$ est supérieure à 5%, cependant sa valeur (0.000005) est strictement positive donc il reste inchangé.
+
+La p-value du coefficient $\alpha_1$ est la pvalue la plus élevée (sans considérer $\alpha_0$, skew et shape) et elle est supérieure à 5%. On rejette $H_0$  du test de significativité des coefficients et fixe la valeur de $\alpha_1$ à 0.
+
+```{r gjr ghst 2}
+
+spec2 = ugarchspec(variance.model=list(model="gjrGARCH", garchOrder=c(1,1)),
+mean.model=list(armaOrder=c(1,1)),distribution.model="ghst",fixed.pars=list(alpha1=0))
+fit2= ugarchfit(spec = spec2,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit2)
+
+```
+
+La p-value du coefficient $\gamma_1$ est la pvalue la plus élevée (sans considérer $\alpha_0$, skew et shape) et elle est supérieure à 5%. On rejette $H_0$  du test de significativité des coefficients et fixe la valeur de $\gamma_1$ à 0.
+
+```{r gjr ghst 3}
+
+spec2 = ugarchspec(variance.model=list(model="gjrGARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(1,1)),distribution.model="ghst",fixed.pars=list(alpha1=0, gamma1=0))
+fit2= ugarchfit(spec = spec2,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit2)
+
+
+```
+
+La p-value du coefficient $\mu$ est la pvalue la plus élevée (sans considérer $\alpha_0$, skew et shape) et elle est supérieure à 5%. On rejette $H_0$  du test de significativité des coefficients et fixe la valeur de $\mu$ à 0
+
+
+## **EGARCH** 
+
+### **Gaussienne inverse asymétrique**
+
+On estime un modèle ARMA(1,1)-EGARCH(1,1) avec une distribution *nig*. 
+Il n'est donc pas nécessaire de prendre en compte la saisonnalité car dans le projet 1 nous avons vu qu'il n'y en avait pas.
+
+```{r eg nig 1}
+
+spec3 = ugarchspec(variance.model=list(model="eGARCH", garchOrder=c(1,1)),
+mean.model=list(armaOrder=c(1,1)),distribution.model="nig")
+fit3 = ugarchfit(spec = spec3, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit3)
+
+```
+
+La p-value du coefficient $\mu$  du modèle ARMA est la pvalue la plus élevée (sans considérer $\alpha_0$, skew et shape) et elle est supérieure à 5%. On rejette $H_0$ du test de significativité des coefficients et fixe la valeur de $\mu$  à 0.
+
+
+### **Hyperbolique généralisée skew t**
+
+On estime un modèle ARMA(1,1)-EGARCH(1,1) avec une distribution *ghst*. Il n'est donc pas nécessaire de prendre en compte la saisonnalité car dans le projet 1 nous avons vu qu'il n'y en avait pas.
+
+```{r eg ghst 1}
+
+spec3 = ugarchspec(variance.model=list(model="eGARCH", garchOrder=c(1,1)),
+mean.model=list(armaOrder=c(1,1)),distribution.model="ghst")
+fit3 = ugarchfit(spec = spec3, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit3)
+
+```
+
+La p-value du coefficient $\mu$  du modèle ARMA est la pvalue la plus élevée (sans considérer $\alpha_0$, skew et shape) et elle est supérieure à 5%. On rejette $H_0$ du test de significativité des coefficients et fixe la valeur de $\mu$  à 0.
+
+
+## **IGARCH** 
+
+### **Hyperbolique généralisée skew t**
+
+On estime un modèle ARMA(1,1)-IGARCH(1,1) avec une distribution *ghst*. Il n'est donc pas nécessaire de prendre en compte la saisonnalité car dans le projet 1 nous avons vu qu'il n'y en avait pas.
+
+
+```{r ig ghst 1}
+
+spec4 = ugarchspec(variance.model=list(model="iGARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(1,1)),distribution.model="ghst")
+fit4 = ugarchfit(spec = spec4, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit4)
+
+```
+
+La p-value du coefficient $\mu$ du modèle ARMA est la pvalue la plus élevée (sans considérer $\alpha_0$, skew et shape) et elle est supérieure à 5%. On rejette $H_0$ du test de significativité des coefficients et fixe la valeur de $\mu$ à 0.
+
+```{r ig ghst 2}
+
+spec4 = ugarchspec(variance.model=list(model="iGARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(1,1)),distribution.model="ghst", fixed.pars=list(mu=0))
+fit4 = ugarchfit(spec = spec4, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit4)
+
+```
+
+La p-value du coefficient $\alpha_1$ du modèle ARMA est la pvalue la plus élevée (sans considérer $\alpha_0$, skew et shape) et elle est supérieure à 5%. On rejette $H_0$ du test de significativité des coefficients et fixe la valeur de $\alpha_1$ à 0.
+`
+```{r ig ghst 3}
+
+spec4 = ugarchspec(variance.model=list(model="iGARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(1,1)),distribution.model="ghst", fixed.pars=list(mu=0,alpha1=0))
+fit4 = ugarchfit(spec = spec4, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit4)
+
+```
+
+La p-value du coefficient $ar_1$ du modèle ARMA est la pvalue la plus élevée (sans considérer $\alpha_0$, skew et shape) et elle est supérieure à 5%. On rejette $H_0$ du test de significativité des coefficients et fixe la valeur de $ar_1$ à 0.
+
+
+## **ARCH-M** 
+
+### **Gaussienne inverse asymétrique**
+
+On estime un modèle ARMA(1,1)-ARCH-M(1,1) avec une distribution *nig*. Il n'est donc pas nécessaire de prendre en compte la saisonnalité car dans le projet 1 nous avons vu qu'il n'y en avait pas.
+
+
+```{r arch nig 1}
+
+spec5 = ugarchspec(mean.model=list(armaOrder=c(1,1),archm=TRUE),distribution.model="nig")
+fit5 = ugarchfit(spec = spec5,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit5)
+
+```
+
+La p-value du coefficient $\alpha_0$ est supérieure à 5%, cependant sa valeur (0.000003 ) est strictement positive donc il reste inchangé.
+
+La p-value du coefficient $\mu$ du modèle ARMA est la pvalue la plus élevée (sans considérer $\alpha_0$, skew et shape) et elle est supérieure à 5%. On rejette $H_0$ du test de significativité des coefficients et fixe la valeur de $\mu$ à 0.
+
+```{r arch nig 2}
+
+spec5 = ugarchspec(mean.model=list(armaOrder=c(1,1),archm=TRUE),distribution.model="nig",fixed.pars=list(mu=0))
+fit5 = ugarchfit(spec = spec5,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit5)
+
+```
+
+La p-value du coefficient $\alpha_0$ est supérieure à 5%, cependant sa valeur est strictement positive  donc il reste inchangé.
+
+La p-value du coefficient $archm$ est la pvalue la plus élevée (sans considérer $\alpha_0$, skew et shape) et elle est supérieure à 5%. On rejette $H_0$ du test de significativité des coefficients et fixe la valeur de $archm$ à 0.
+
+
+### **Hyperbolique généralisée skew t**
+
+On estime un modèle ARMA(1,1)-ARCH-M(1,1) avec une distribution *ghst*. Il n'est donc pas nécessaire de prendre en compte la saisonnalité car dans le projet 1 nous avons vu qu'il n'y en avait pas.
+
+```{r arch ghst 1}
+
+spec5 = ugarchspec(mean.model=list(armaOrder=c(1,1),archm=TRUE),distribution.model="ghst")
+fit5 = ugarchfit(spec = spec5,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit5)
+
+
+```
+
+La p-value du coefficient $\alpha_0$ est supérieure à 5%, cependant sa valeur est strictement positive  donc il reste inchangé.
+
+La p-value du coefficient $\mu$ est la pvalue la plus élevée (sans considérer $\alpha_0$, skew et shape) et elle est supérieure à 5%. On rejette $H_0$  du test de significativité des coefficients et fixe la valeur de $\mu$  à 0.
+
+```{r arch ghst 2}
+
+spec5 = ugarchspec(mean.model=list(armaOrder=c(1,1),archm=TRUE),distribution.model="ghst",fixed.pars=list(mu=0))
+fit5 = ugarchfit(spec = spec5,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit5)
+
+
+```
+
+La p-value du coefficient $\alpha_1$ est la pvalue la plus élevée (sans considérer $\alpha_0$, skew et shape) et elle est supérieure à 5%. On rejette $H_0$  du test de significativité des coefficients et fixe la valeur de $\alpha_1$  à 0.
+
+```{r arch ghst 3}
+
+spec5 = ugarchspec(mean.model=list(armaOrder=c(1,1),archm=TRUE),distribution.model="ghst",fixed.pars=list(mu=0, alpha1=0))
+fit5 = ugarchfit(spec = spec5,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit5)
+
+```
+
+La p-value du coefficient $archm$ est la pvalue la plus élevée (sans considérer $\alpha_0$, skew et shape) et elle est supérieure à 5%. On rejette $H_0$  du test de significativité des coefficients et fixe la valeur de $archm$  à 0.
+
+
+## **GARCH** 
+
+### **Gaussienne inverse asymétrique**
+
+On estime un modèle ARMA(1,1)-GARCH(1,1) avec une distribution *nig*. Il n'est donc pas nécessaire de prendre en compte la saisonnalité car dans le projet 1 nous avons vu qu'il n'y en avait pas.
+
+```{r garch nig 1}
+
+spec6 = ugarchspec(distribution.model="nig")
+fit6 = ugarchfit(spec = spec6, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit6)
+
+```
+
+La p-value du coefficient $\alpha_0$ est supérieure à 5%, cependant sa valeur est strictement positive donc il reste inchangé.
+
+La p-value du coefficient $\alpha_1$ est la pvalue la plus élevée (sans considérer $\alpha_0$, skew et shape) et elle est supérieure à 5%. On rejette $H_0$ du test de significativité des coefficients et fixe la valeur de $\alpha_1$ à 0
+
+```{r garch nig 2}
+
+spec6 = ugarchspec(distribution.model="nig",fixed.pars=list(alpha1=0))
+fit6 = ugarchfit(spec = spec6, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit6)
+
+```
+
+La p-value du coefficient $\mu$ est la pvalue la plus élevée (sans considérer $\alpha_0$, skew et shape) et elle est supérieure à 5%.  On rejette $H_0$ du test de significativité des coefficients et fixe la valeur de $\mu$ à 0.
+
+### **Hyperbolique généralisée skew t**
+
+On estime un modèle ARMA(1,1)-GARCH(1,1) avec une distribution *ghst*. Il n'est donc pas nécessaire de prendre en compte la saisonnalité car dans le projet 1 nous avons vu qu'il n'y en avait pas.
+
+```{r garch ghst 1}
+
+spec6 = ugarchspec(distribution.model="ghst")
+fit6 = ugarchfit(spec = spec6, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit6)
+
+```
+
+
+La p-value du coefficient $\alpha_0$ est supérieure à 5%, cependant sa valeur est strictement positive donc il reste inchangé.
+
+La p-value du coefficient $\alpha_1$ est la pvalue la plus élevée (sans considérer $\alpha_0$, skew et shape) et elle est supérieure à 5%. On rejette $H_0$ du test de significativité des coefficients et fixe la valeur de $\alpha_1$ à 0
+
+
+```{r garch ghst 2}
+
+spec6 = ugarchspec(distribution.model="ghst", fixed.pars=list(alpha1=0))
+fit6 = ugarchfit(spec = spec6, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit6)
+
+```
+
+La p-value du coefficient $\mu$ est la pvalue la plus élevée (sans considérer $\alpha_0$, skew et shape) et elle est supérieure à 5%. On rejette $H_0$ du test de significativité des coefficients et fixe la valeur de $\mu$ à 0
