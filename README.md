@@ -41,7 +41,6 @@ Le second projet prolonge cette analyse par la modélisation de la moyenne et de
 - [Reproduire le projet](#reproduire-le-projet)
 - [Compétences démontrées](#compétences-démontrées)
 - [Limites](#limites)
-- [Avertissement](#avertissement)
 - [Auteur](#auteur)
 
 ---
@@ -730,19 +729,13 @@ schneider-electric-rendements-var-backtesting/
 │
 ├── projet-1-caracteristiques-rendements/
 │   ├── BAILLET_Projet1.Rmd
-│   ├── BAILLET_Projet1.html
-│   └── BAILLET_Projet1.pdf
 │
 ├── projet-2-var-backtesting/
 │   ├── BAILLET_Projet2.Rmd
-│   ├── BAILLET_Projet2.html
-│   └── BAILLET_Projet2.pdf
 │
 └── documentation/
-    └── Synthese_Schneider_Electric_VaR_Backtesting.pdf
+    └── Synthese_Value_At_Risk.pdf
 ```
-
-Les fichiers HTML et PDF peuvent être absents si seuls les fichiers R Markdown sources sont publiés.
 
 ---
 
