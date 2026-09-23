@@ -1,5 +1,11 @@
 # Schneider Electric - Rendements, volatilité, Value at Risk et backtesting
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/benjaminblt/benjaminblt/main/assets/var.jpg"
+       alt="Risque de marché - VaR, GARCH et Backtesting"
+       width="100%">
+</p>
+
 ![R](https://img.shields.io/badge/R-Analyse%20statistique-276DC3?logo=r&logoColor=white)
 ![R Markdown](https://img.shields.io/badge/R%20Markdown-Rapports-75AADB)
 ![Économétrie](https://img.shields.io/badge/Économétrie-Séries%20temporelles-0B1F3A)
